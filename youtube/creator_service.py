@@ -1,11 +1,12 @@
 """
-YouTube Podcast Service
-Business logic for searching and filtering YouTube podcasts.
+Creator Discovery Service
+Business logic for finding and filtering YouTube creators.
 
 This module provides core functionality for:
 - Searching YouTube for videos by keyword
 - Fetching video and channel statistics
 - Filtering videos and channels by various criteria
+- Calculating activity metrics (median views, publish interval)
 - Aggregating results by channel
 - Exporting results to JSONL format
 """
@@ -13,7 +14,8 @@ This module provides core functionality for:
 import json
 import logging
 import time
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -24,7 +26,7 @@ from googleapiclient.errors import HttpError
 
 # Global configuration - easy to modify
 MAX_RESULTS_PER_KEYWORD = 1000
-OUTPUT_FILE = "podcasts.jsonl"
+OUTPUT_FILE = "creators.jsonl"
 MIN_VIEWS = 100
 MAX_VIEWS = 1000
 MIN_CHANNEL_VIDEOS = 5
@@ -123,13 +125,13 @@ class YouTubeService:
 
     def get_video_statistics(self, video_ids: List[str]) -> Dict[str, Dict]:
         """
-        Fetch statistics for videos (view count).
+        Fetch statistics and snippet for videos (view count, publish date).
 
         Args:
             video_ids: List of video IDs
 
         Returns:
-            Dict mapping video_id to stats dict with viewCount
+            Dict mapping video_id to stats dict with viewCount and publishedAt
         """
         stats = {}
 
@@ -142,7 +144,7 @@ class YouTubeService:
                 batch = video_ids[i:i + BATCH_SIZE]
 
                 request = self._youtube.videos().list(
-                    part='statistics',
+                    part='statistics,snippet',
                     id=','.join(batch)
                 )
                 response = request.execute()
@@ -150,7 +152,20 @@ class YouTubeService:
                 for item in response.get('items', []):
                     video_id = item['id']
                     view_count = int(item.get('statistics', {}).get('viewCount', 0))
-                    stats[video_id] = {'viewCount': view_count}
+                    published_at_str = item.get('snippet', {}).get('publishedAt', '')
+
+                    # Parse ISO 8601 date
+                    published_at = None
+                    if published_at_str:
+                        try:
+                            published_at = datetime.fromisoformat(published_at_str.replace('Z', '+00:00'))
+                        except ValueError:
+                            pass
+
+                    stats[video_id] = {
+                        'viewCount': view_count,
+                        'publishedAt': published_at
+                    }
 
                 # Be respectful with API calls
                 time.sleep(0.1)
@@ -219,7 +234,7 @@ def filter_videos_by_views(videos: List[Dict], stats: Dict[str, Dict], min_views
         max_views: Maximum view count threshold
 
     Returns:
-        Filtered list of videos with their view counts
+        Filtered list of videos with their view counts and publish dates
     """
     filtered = []
     for video in videos:
@@ -227,11 +242,13 @@ def filter_videos_by_views(videos: List[Dict], stats: Dict[str, Dict], min_views
         if video_id not in stats:
             continue
 
-        view_count = stats[video_id]['viewCount']
+        video_stats = stats[video_id]
+        view_count = video_stats['viewCount']
         if min_views <= view_count <= max_views:
             filtered.append({
                 **video,
-                'views': view_count
+                'views': view_count,
+                'published_at': video_stats.get('publishedAt')
             })
 
     return filtered
@@ -284,6 +301,82 @@ def filter_channels_by_subscribers(channel_ids: List[str], stats: Dict[str, Dict
 
     return filtered
 
+
+def filter_channels_by_activity(channels: Dict[str, Dict], max_days_since_publish: int = 30) -> Dict[str, Dict]:
+    """
+    Filter to channels that have been active within N days.
+
+    Args:
+        channels: Dict mapping channel_id to channel data
+        max_days_since_publish: Maximum days since last video upload
+
+    Returns:
+        Filtered dict of channels active within the timeframe
+    """
+    from datetime import timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_days_since_publish)
+
+    return {
+        cid: data for cid, data in channels.items()
+        if data.get('last_published') and data['last_published'] >= cutoff
+    }
+
+
+# ============================================================================
+# SORTING
+# ============================================================================
+
+class SortOption:
+    """Sort options for channel results."""
+    RELEVANCE = "relevance"
+    MEDIAN_VIEWS = "median_views"
+    SUBSCRIBERS = "subscribers"
+    ACTIVITY = "activity"
+
+
+def sort_channels(channels: Dict[str, Dict], sort_by: str, descending: bool = True) -> List[Dict]:
+    """
+    Sort channels by specified criteria.
+
+    Args:
+        channels: Dict mapping channel_id to channel data
+        sort_by: One of SortOption values
+        descending: Sort in descending order (default True)
+
+    Returns:
+        List of channel data dicts (not dict) to preserve sort order
+    """
+    channel_list = list(channels.values())
+
+    if sort_by == SortOption.RELEVANCE:
+        return channel_list
+
+    key_funcs = {
+        SortOption.MEDIAN_VIEWS: lambda c: c.get('median_views', 0),
+        SortOption.SUBSCRIBERS: lambda c: c.get('subscriber_count', 0),
+        SortOption.ACTIVITY: lambda c: c.get('last_published') or datetime.min,
+    }
+
+    key_func = key_funcs.get(sort_by)
+    if key_func is None:
+        return channel_list
+
+    # For activity, we want most recent first when descending
+    # Handle timezone-naive datetime.min comparison
+    if sort_by == SortOption.ACTIVITY:
+        def activity_key(c):
+            lp = c.get('last_published')
+            if lp is None:
+                return datetime.min
+            # Make timezone-naive for comparison
+            if lp.tzinfo is not None:
+                return lp.replace(tzinfo=None)
+            return lp
+        key_func = activity_key
+
+    return sorted(channel_list, key=key_func, reverse=descending)
+
 # ============================================================================
 # DATA AGGREGATION
 # ============================================================================
@@ -293,12 +386,12 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
     Aggregate videos by channel and add channel metadata.
 
     Args:
-        videos: List of filtered videos with views
+        videos: List of filtered videos with views and published_at
         channel_stats: Dict mapping channel_id to stats
         keyword: The keyword that found these videos
 
     Returns:
-        Dict mapping channel_id to channel data with videos list
+        Dict mapping channel_id to channel data with videos list and calculated metrics
     """
     channels = {}
 
@@ -325,8 +418,16 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
             'title': video['title'],
             'url': f"youtube.com/watch?v={video['video_id']}",
             'views': video['views'],
+            'published_at': video.get('published_at'),
             'keywords': [keyword] if keyword not in [k for v in channels[channel_id]['videos'] for k in v.get('keywords', [])] else []
         })
+
+    # Calculate derived metrics for each channel
+    for channel_id, channel_data in channels.items():
+        channel_data['median_views'] = calculate_median_views(channel_data)
+        channel_data['average_views'] = calculate_average_views(channel_data)
+        channel_data['publish_interval_days'] = calculate_publish_interval(channel_data)
+        channel_data['last_published'] = get_last_published(channel_data)
 
     return channels
 
@@ -383,6 +484,104 @@ def calculate_average_views(channel_data: Dict) -> float:
     if not videos:
         return 0.0
     return sum(v['views'] for v in videos) / len(videos)
+
+
+def calculate_median_views(channel_data: Dict) -> int:
+    """
+    Calculate median views for a channel's videos.
+
+    Median is more accurate than average - not skewed by viral outliers.
+
+    Args:
+        channel_data: Channel dict with videos list
+
+    Returns:
+        Median view count across all videos
+    """
+    videos = channel_data.get('videos', [])
+    if not videos:
+        return 0
+
+    views = sorted(v['views'] for v in videos)
+    mid = len(views) // 2
+
+    if len(views) % 2 == 0:
+        return (views[mid - 1] + views[mid]) // 2
+    return views[mid]
+
+
+def calculate_publish_interval(channel_data: Dict) -> Optional[float]:
+    """
+    Calculate average days between video uploads.
+
+    Args:
+        channel_data: Channel dict with videos list containing published_at
+
+    Returns:
+        Average days between uploads, or None if fewer than 2 videos with dates
+    """
+    videos = channel_data.get('videos', [])
+    dates = sorted(
+        [v['published_at'] for v in videos if v.get('published_at')],
+        reverse=True
+    )
+
+    if len(dates) < 2:
+        return None
+
+    intervals = [
+        (dates[i] - dates[i + 1]).days
+        for i in range(len(dates) - 1)
+    ]
+    return sum(intervals) / len(intervals) if intervals else None
+
+
+def get_last_published(channel_data: Dict) -> Optional[datetime]:
+    """
+    Get the most recent publish date from videos.
+
+    Args:
+        channel_data: Channel dict with videos list containing published_at
+
+    Returns:
+        Most recent publish date, or None if no dates available
+    """
+    videos = channel_data.get('videos', [])
+    dates = [v['published_at'] for v in videos if v.get('published_at')]
+    return max(dates) if dates else None
+
+
+def format_publish_interval(days: Optional[float]) -> str:
+    """
+    Format publish interval as human-readable string.
+
+    Args:
+        days: Average days between uploads
+
+    Returns:
+        Human-readable string like "Every 2 weeks" or "N/A"
+    """
+    if days is None:
+        return "N/A"
+
+    if days < 1:
+        return "Multiple per day"
+    elif days < 2:
+        return "Daily"
+    elif days < 4:
+        return "Every few days"
+    elif days < 8:
+        return "Weekly"
+    elif days < 15:
+        return "Every 2 weeks"
+    elif days < 22:
+        return "Every 3 weeks"
+    elif days < 45:
+        return "Monthly"
+    elif days < 75:
+        return "Every 2 months"
+    else:
+        return "Infrequent"
 
 def write_channels_to_jsonl(channels: Dict[str, Dict], output_file: str):
     """
