@@ -13,6 +13,7 @@ This module provides core functionality for:
 
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -144,15 +145,19 @@ class YouTubeService:
                 batch = video_ids[i:i + BATCH_SIZE]
 
                 request = self._youtube.videos().list(
-                    part='statistics,snippet',
+                    part='statistics,snippet,contentDetails',
                     id=','.join(batch)
                 )
                 response = request.execute()
 
                 for item in response.get('items', []):
                     video_id = item['id']
-                    view_count = int(item.get('statistics', {}).get('viewCount', 0))
+                    statistics = item.get('statistics', {})
+                    view_count = int(statistics.get('viewCount', 0))
+                    like_count = int(statistics.get('likeCount', 0))
+                    comment_count = int(statistics.get('commentCount', 0))
                     published_at_str = item.get('snippet', {}).get('publishedAt', '')
+                    duration = item.get('contentDetails', {}).get('duration', '')
 
                     # Parse ISO 8601 date
                     published_at = None
@@ -164,7 +169,10 @@ class YouTubeService:
 
                     stats[video_id] = {
                         'viewCount': view_count,
-                        'publishedAt': published_at
+                        'publishedAt': published_at,
+                        'likeCount': like_count,
+                        'commentCount': comment_count,
+                        'duration': duration,
                     }
 
                 # Be respectful with API calls
@@ -218,6 +226,7 @@ class YouTubeService:
                         'publishedAt': snippet.get('publishedAt', ''),
                         'thumbnailUrl': snippet.get('thumbnails', {}).get('medium', {}).get('url', ''),
                         'uploadsPlaylistId': content_details.get('relatedPlaylists', {}).get('uploads', ''),
+                        'description': snippet.get('description', ''),
                     }
 
                 # Be respectful with API calls
@@ -329,7 +338,10 @@ def filter_videos_by_views(videos: List[Dict], stats: Dict[str, Dict], min_views
             filtered.append({
                 **video,
                 'views': view_count,
-                'published_at': video_stats.get('publishedAt')
+                'published_at': video_stats.get('publishedAt'),
+                'likes': video_stats.get('likeCount', 0),
+                'comment_count': video_stats.get('commentCount', 0),
+                'duration_seconds': parse_iso8601_duration(video_stats.get('duration', '')),
             })
 
     return filtered
@@ -506,6 +518,7 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
                 'created_at': created_at,
                 'thumbnail_url': stats.get('thumbnailUrl', ''),
                 'uploads_playlist_id': stats.get('uploadsPlaylistId', ''),
+                'description': stats.get('description', ''),
                 'videos': []
             }
 
@@ -515,6 +528,9 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
             'url': f"youtube.com/watch?v={video['video_id']}",
             'views': video['views'],
             'published_at': video.get('published_at'),
+            'likes': video.get('likes', 0),
+            'comment_count': video.get('comment_count', 0),
+            'duration_seconds': video.get('duration_seconds', 0),
             'keywords': [keyword] if keyword not in [k for v in channels[channel_id]['videos'] for k in v.get('keywords', [])] else []
         })
 
@@ -524,6 +540,12 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
         channel_data['average_views'] = calculate_average_views(channel_data)
         channel_data['publish_interval_days'] = calculate_publish_interval(channel_data)
         channel_data['last_published'] = get_last_published(channel_data)
+        # New metrics
+        channel_data['median_likes'] = calculate_median_likes(channel_data)
+        channel_data['median_comments'] = calculate_median_comments(channel_data)
+        channel_data['avg_duration'] = calculate_avg_duration(channel_data)
+        channel_data['views_to_subs_ratio'] = calculate_views_to_subs_ratio(channel_data)
+        channel_data['channel_score'] = calculate_channel_score(channel_data)
 
     return channels
 
@@ -711,3 +733,243 @@ def write_channels_to_jsonl(channels: Dict[str, Dict], output_file: str):
 
     except IOError as e:
         logger.warning(f"Error writing to {output_file}: {e}")
+
+# ============================================================================
+# NEW METRIC CALCULATIONS
+# ============================================================================
+
+def parse_iso8601_duration(duration: str) -> int:
+    """
+    Parse ISO 8601 duration (PT1H23M45S) to seconds.
+
+    Args:
+        duration: ISO 8601 duration string
+
+    Returns:
+        Duration in seconds
+    """
+    if not duration:
+        return 0
+
+    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+    if not match:
+        return 0
+
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_duration(seconds: int) -> str:
+    """
+    Format seconds as HH:MM:SS or MM:SS.
+
+    Args:
+        seconds: Duration in seconds
+
+    Returns:
+        Formatted duration string
+    """
+    if seconds <= 0:
+        return "0:00"
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def calculate_median_likes(channel_data: Dict) -> int:
+    """
+    Calculate median likes across videos.
+
+    Args:
+        channel_data: Channel dict with videos list
+
+    Returns:
+        Median like count
+    """
+    videos = channel_data.get('videos', [])
+    if not videos:
+        return 0
+
+    likes = sorted(v.get('likes', 0) for v in videos)
+    mid = len(likes) // 2
+
+    if len(likes) % 2 == 0:
+        return (likes[mid - 1] + likes[mid]) // 2
+    return likes[mid]
+
+
+def calculate_median_comments(channel_data: Dict) -> int:
+    """
+    Calculate median comments across videos.
+
+    Args:
+        channel_data: Channel dict with videos list
+
+    Returns:
+        Median comment count
+    """
+    videos = channel_data.get('videos', [])
+    if not videos:
+        return 0
+
+    comments = sorted(v.get('comment_count', 0) for v in videos)
+    mid = len(comments) // 2
+
+    if len(comments) % 2 == 0:
+        return (comments[mid - 1] + comments[mid]) // 2
+    return comments[mid]
+
+
+def calculate_avg_duration(channel_data: Dict) -> int:
+    """
+    Calculate average video duration in seconds.
+
+    Args:
+        channel_data: Channel dict with videos list
+
+    Returns:
+        Average duration in seconds
+    """
+    videos = channel_data.get('videos', [])
+    durations = [v.get('duration_seconds', 0) for v in videos if v.get('duration_seconds', 0) > 0]
+
+    if not durations:
+        return 0
+    return sum(durations) // len(durations)
+
+
+def calculate_views_to_subs_ratio(channel_data: Dict) -> float:
+    """
+    Calculate views-to-subscribers ratio as percentage.
+
+    Args:
+        channel_data: Channel dict with median_views and subscriber_count
+
+    Returns:
+        Ratio as percentage
+    """
+    median_views = channel_data.get('median_views', 0)
+    subscribers = channel_data.get('subscriber_count', 1)
+
+    if subscribers == 0:
+        return 0.0
+
+    return (median_views / subscribers) * 100
+
+
+def get_views_to_subs_label(ratio: float) -> str:
+    """
+    Get performance label based on views-to-subs ratio.
+
+    Args:
+        ratio: Views-to-subscribers ratio as percentage
+
+    Returns:
+        Performance label string
+    """
+    if ratio < 5:
+        return "Poor"
+    elif ratio < 10:
+        return "Below Average"
+    elif ratio < 20:
+        return "Average"
+    elif ratio < 50:
+        return "Good"
+    else:
+        return "Excellent"
+
+
+def calculate_channel_score(channel_data: Dict) -> int:
+    """
+    Calculate overall channel score (0-100).
+
+    Formula:
+    - Activity (30%): Based on publish frequency
+    - Content Performance (35%): Views-to-subs ratio
+    - Engagement (35%): Likes and comments relative to views
+
+    Args:
+        channel_data: Channel dict with all metrics
+
+    Returns:
+        Score from 0-100
+    """
+    # Activity Score (0-100)
+    interval_days = channel_data.get('publish_interval_days')
+    if interval_days is None or interval_days > 60:
+        activity_score = 30
+    elif interval_days > 30:
+        activity_score = 50
+    elif interval_days > 14:
+        activity_score = 70
+    elif interval_days > 7:
+        activity_score = 85
+    else:
+        activity_score = 100
+
+    # Content Performance Score (0-100)
+    views_to_subs = calculate_views_to_subs_ratio(channel_data)
+    if views_to_subs < 2:
+        perf_score = 20
+    elif views_to_subs < 5:
+        perf_score = 40
+    elif views_to_subs < 10:
+        perf_score = 60
+    elif views_to_subs < 20:
+        perf_score = 80
+    else:
+        perf_score = 100
+
+    # Engagement Score (0-100)
+    median_views = channel_data.get('median_views', 1)
+    median_likes = channel_data.get('median_likes', 0)
+    median_comments = channel_data.get('median_comments', 0)
+
+    if median_views > 0:
+        like_ratio = (median_likes / median_views) * 100
+        comment_ratio = (median_comments / median_views) * 100
+    else:
+        like_ratio = 0
+        comment_ratio = 0
+
+    # Typical good engagement: 4% likes, 0.5% comments
+    like_score = min(100, (like_ratio / 4) * 100)
+    comment_score = min(100, (comment_ratio / 0.5) * 100)
+    engagement_score = (like_score * 0.7 + comment_score * 0.3)
+
+    # Weighted total
+    total = (
+        activity_score * 0.30 +
+        perf_score * 0.35 +
+        engagement_score * 0.35
+    )
+
+    return round(total)
+
+
+def get_score_label(score: int) -> str:
+    """
+    Get label for channel score.
+
+    Args:
+        score: Channel score (0-100)
+
+    Returns:
+        Label string
+    """
+    if score >= 80:
+        return "Excellent"
+    elif score >= 60:
+        return "Good"
+    elif score >= 40:
+        return "Average"
+    else:
+        return "Poor"
