@@ -1,2 +1,1 @@
 - Every time you want to test the python files you need to active the enviroment in .venv first
-- Every time you're requested a change create a new branch

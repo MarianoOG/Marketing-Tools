@@ -93,6 +93,12 @@ def cached_get_channel_statistics(_service: YouTubeService, channel_ids: List[st
     """Cached wrapper for channel statistics."""
     return _service.get_channel_statistics(channel_ids)
 
+
+@st.cache_data(show_spinner=False)
+def cached_get_channel_latest_videos(_service: YouTubeService, uploads_playlist_id: str, max_results: int = 10) -> List[Dict]:
+    """Cached wrapper for fetching channel's latest videos."""
+    return _service.get_channel_latest_videos(uploads_playlist_id, max_results)
+
 # ============================================================================
 # SERVICE INITIALIZATION
 # ============================================================================
@@ -229,7 +235,7 @@ def render_overview_table(channels: List[Dict]) -> Optional[str]:
 # UI COMPONENTS - DETAIL PAGE
 # ============================================================================
 
-def render_channel_detail(channel_data: Dict):
+def render_channel_detail(channel_data: Dict, service: YouTubeService):
     """Render detailed view for selected channel."""
 
     # Back button
@@ -239,11 +245,35 @@ def render_channel_detail(channel_data: Dict):
 
     st.divider()
 
-    # Channel header
-    st.subheader(channel_data['channel_name'])
-    st.markdown(f"[Visit Channel](https://youtube.com/channel/{channel_data['channel_id']})")
+    # Channel header with thumbnail
+    header_cols = st.columns([1, 4])
 
-    # Metrics row
+    with header_cols[0]:
+        thumbnail_url = channel_data.get('thumbnail_url', '')
+        if thumbnail_url:
+            st.image(thumbnail_url, width=120)
+
+    with header_cols[1]:
+        st.subheader(channel_data['channel_name'])
+        st.markdown(f"[Visit Channel](https://youtube.com/channel/{channel_data['channel_id']})")
+
+        # Country and creation date info
+        country = channel_data.get('country', '')
+        creation_date = channel_data.get('created_at')
+
+        info_parts = []
+        if country:
+            info_parts.append(f"Country: {country}")
+        if creation_date:
+            if isinstance(creation_date, datetime):
+                info_parts.append(f"Created: {creation_date.strftime('%b %d, %Y')}")
+            else:
+                info_parts.append(f"Created: {creation_date}")
+
+        if info_parts:
+            st.caption(" | ".join(info_parts))
+
+    # Metrics row 1
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -264,17 +294,66 @@ def render_channel_detail(channel_data: Dict):
         else:
             st.metric("Last Published", "N/A")
 
-    # Additional stats
-    col5, col6 = st.columns(2)
+    # Metrics row 2
+    col5, col6, col7, col8 = st.columns(4)
+
     with col5:
         st.metric("Total Videos", channel_data['total_videos'])
+
     with col6:
         st.metric("Average Views", f"{channel_data.get('average_views', 0):,.0f}")
 
+    with col7:
+        total_views = channel_data.get('total_channel_views', 0)
+        st.metric("Total Channel Views", f"{total_views:,}")
+
+    with col8:
+        country_display = channel_data.get('country', 'N/A')
+        st.metric("Country", country_display if country_display else "N/A")
+
     st.divider()
 
-    # Videos found section
-    st.subheader("Videos Found")
+    # Latest Videos section (NEW)
+    st.subheader("Latest Videos")
+
+    uploads_playlist_id = channel_data.get('uploads_playlist_id', '')
+
+    if uploads_playlist_id:
+        latest_videos = cached_get_channel_latest_videos(service, uploads_playlist_id, max_results=50)
+
+        if latest_videos:
+            latest_video_data = []
+            for v in latest_videos:
+                pub_date = v.get('published_at')
+                pub_str = pub_date.strftime('%b %d, %Y') if pub_date else 'N/A'
+                latest_video_data.append({
+                    'Title': v['title'],
+                    'Views': v['views'],
+                    'Published': pub_str,
+                    'URL': f"https://{v['url']}",
+                })
+
+            latest_df = pd.DataFrame(latest_video_data)
+            st.dataframe(
+                latest_df,
+                column_config={
+                    'Title': st.column_config.TextColumn('Title', width='large'),
+                    'Views': st.column_config.NumberColumn('Views', format='%d'),
+                    'Published': st.column_config.TextColumn('Published'),
+                    'URL': st.column_config.LinkColumn('Link', display_text='Watch'),
+                },
+                hide_index=True,
+                width='stretch',
+            )
+        else:
+            st.info("Could not load latest videos.")
+    else:
+        st.info("Uploads playlist not available.")
+
+    st.divider()
+
+    # Videos found section (from search)
+    st.subheader("Videos Found (from search)")
     videos = channel_data.get('videos', [])
 
     if videos:
@@ -302,7 +381,7 @@ def render_channel_detail(channel_data: Dict):
             width='stretch',
         )
     else:
-        st.info("No videos found for this channel.")
+        st.info("No videos found for this channel in search.")
 
 # ============================================================================
 # SEARCH PROCESSING
@@ -396,7 +475,7 @@ def main():
     if st.session_state.selected_channel:
         channel_id = st.session_state.selected_channel
         if channel_id in st.session_state.search_results:
-            render_channel_detail(st.session_state.search_results[channel_id])
+            render_channel_detail(st.session_state.search_results[channel_id], service)
             return
 
     # Overview page

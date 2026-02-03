@@ -178,13 +178,14 @@ class YouTubeService:
 
     def get_channel_statistics(self, channel_ids: List[str]) -> Dict[str, Dict]:
         """
-        Fetch statistics for channels (subscriber count, video count).
+        Fetch statistics for channels (subscriber count, video count, views, etc.).
 
         Args:
             channel_ids: List of channel IDs
 
         Returns:
-            Dict mapping channel_id to stats dict with subscriberCount, videoCount, customUrl
+            Dict mapping channel_id to stats dict with subscriberCount, videoCount,
+            viewCount, customUrl, country, publishedAt, thumbnailUrl, uploadsPlaylistId
         """
         stats = {}
 
@@ -197,17 +198,26 @@ class YouTubeService:
                 batch = channel_ids[i:i + BATCH_SIZE]
 
                 request = self._youtube.channels().list(
-                    part='statistics,snippet',
+                    part='statistics,snippet,contentDetails',
                     id=','.join(batch)
                 )
                 response = request.execute()
 
                 for item in response.get('items', []):
                     channel_id = item['id']
+                    snippet = item.get('snippet', {})
+                    statistics = item.get('statistics', {})
+                    content_details = item.get('contentDetails', {})
+
                     stats[channel_id] = {
-                        'subscriberCount': int(item.get('statistics', {}).get('subscriberCount', 0)),
-                        'videoCount': int(item.get('statistics', {}).get('videoCount', 0)),
-                        'customUrl': item.get('snippet', {}).get('customUrl', '')
+                        'subscriberCount': int(statistics.get('subscriberCount', 0)),
+                        'videoCount': int(statistics.get('videoCount', 0)),
+                        'viewCount': int(statistics.get('viewCount', 0)),
+                        'customUrl': snippet.get('customUrl', ''),
+                        'country': snippet.get('country', ''),
+                        'publishedAt': snippet.get('publishedAt', ''),
+                        'thumbnailUrl': snippet.get('thumbnails', {}).get('medium', {}).get('url', ''),
+                        'uploadsPlaylistId': content_details.get('relatedPlaylists', {}).get('uploads', ''),
                     }
 
                 # Be respectful with API calls
@@ -218,6 +228,77 @@ class YouTubeService:
         except HttpError as e:
             logger.warning(f"Error fetching channel statistics: {e}")
             return stats
+
+    def get_channel_latest_videos(self, uploads_playlist_id: str, max_results: int = 10) -> List[Dict]:
+        """
+        Fetch the latest videos from a channel's uploads playlist.
+
+        Args:
+            uploads_playlist_id: The playlist ID for the channel's uploads
+            max_results: Maximum number of videos to fetch (default 10)
+
+        Returns:
+            List of video dictionaries with video_id, title, views, published_at, url
+        """
+        if not uploads_playlist_id:
+            return []
+
+        videos = []
+
+        try:
+            # Step 1: Get playlist items (video IDs and basic info)
+            request = self._youtube.playlistItems().list(
+                part='snippet',
+                playlistId=uploads_playlist_id,
+                maxResults=max_results
+            )
+            response = request.execute()
+
+            video_ids = []
+            video_info = {}
+
+            for item in response.get('items', []):
+                snippet = item.get('snippet', {})
+                video_id = snippet.get('resourceId', {}).get('videoId', '')
+                if video_id:
+                    video_ids.append(video_id)
+                    video_info[video_id] = {
+                        'video_id': video_id,
+                        'title': snippet.get('title', ''),
+                        'published_at_str': snippet.get('publishedAt', ''),
+                    }
+
+            # Step 2: Get video statistics for view counts
+            if video_ids:
+                stats = self.get_video_statistics(video_ids)
+
+                for video_id in video_ids:
+                    info = video_info[video_id]
+                    video_stats = stats.get(video_id, {})
+
+                    # Parse the published date
+                    published_at = None
+                    if info['published_at_str']:
+                        try:
+                            published_at = datetime.fromisoformat(
+                                info['published_at_str'].replace('Z', '+00:00')
+                            )
+                        except ValueError:
+                            pass
+
+                    videos.append({
+                        'video_id': video_id,
+                        'title': info['title'],
+                        'views': video_stats.get('viewCount', 0),
+                        'published_at': published_at or video_stats.get('publishedAt'),
+                        'url': f"youtube.com/watch?v={video_id}",
+                    })
+
+            return videos
+
+        except HttpError as e:
+            logger.warning(f"Error fetching playlist videos: {e}")
+            return []
 
 # ============================================================================
 # FILTERING & VALIDATION
@@ -404,12 +485,27 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
         if channel_id not in channels:
             # Create new channel entry
             stats = channel_stats[channel_id]
+
+            # Parse creation date
+            created_at = None
+            published_at_str = stats.get('publishedAt', '')
+            if published_at_str:
+                try:
+                    created_at = datetime.fromisoformat(published_at_str.replace('Z', '+00:00'))
+                except ValueError:
+                    pass
+
             channels[channel_id] = {
                 'channel_name': video['channel_name'],
                 'channel_id': channel_id,
                 'channel_url': f"youtube.com/channel/{channel_id}",
                 'subscriber_count': stats['subscriberCount'],
                 'total_videos': stats['videoCount'],
+                'total_channel_views': stats.get('viewCount', 0),
+                'country': stats.get('country', ''),
+                'created_at': created_at,
+                'thumbnail_url': stats.get('thumbnailUrl', ''),
+                'uploads_playlist_id': stats.get('uploadsPlaylistId', ''),
                 'videos': []
             }
 
