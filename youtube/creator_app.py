@@ -217,8 +217,10 @@ def render_overview_table(channels: List[Dict]) -> Optional[str]:
     )
 
     # Check if a row was selected
-    if selected and selected.selection and selected.selection.rows:
-        selected_idx = selected.selection.rows[0]
+    selection = selected.get("selection") if selected else None
+    rows = selection.get("rows") if selection else None
+    if rows:
+        selected_idx = rows[0]
         return table_data[selected_idx]['channel_id']
 
     return None
