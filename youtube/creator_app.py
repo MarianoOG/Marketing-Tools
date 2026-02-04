@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 from creator_service import (
     YouTubeService,
     filter_videos_by_views,
-    filter_channels_by_video_count,
     filter_channels_by_subscribers,
     filter_channels_by_activity,
     aggregate_channels,
