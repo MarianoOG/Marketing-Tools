@@ -19,83 +19,15 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from creator_service import (
-    YouTubeService,
-    filter_videos_by_views,
-    filter_channels_by_subscribers,
-    filter_channels_by_activity,
-    aggregate_channels,
-    merge_channels,
-    sort_channels,
-    format_publish_interval,
-    format_duration,
-    get_views_to_subs_label,
-    get_score_label,
-    SortOption,
-    MIN_VIEWS,
-    MAX_VIEWS,
-    MIN_CHANNEL_VIDEOS,
-    MAX_CHANNEL_VIDEOS,
-    MIN_SUBSCRIBERS,
-    MAX_SUBSCRIBERS,
-)
-
-# ============================================================================
-# FILTER PRESETS
-# ============================================================================
-
-VIEW_PRESETS = {
-    "Any": (0, 10_000_000),
-    "< 1K": (0, 1_000),
-    "1K - 10K": (1_000, 10_000),
-    "10K - 100K": (10_000, 100_000),
-    "100K+": (100_000, 10_000_000),
-}
-
-SUBSCRIBER_PRESETS = {
-    "Any": (0, 100_000_000),
-    "< 1K": (0, 1_000),
-    "1K - 10K": (1_000, 10_000),
-    "10K - 100K": (10_000, 100_000),
-    "100K - 1M": (100_000, 1_000_000),
-    "1M+": (1_000_000, 100_000_000),
-}
-
-ACTIVITY_PRESETS = {
-    "Any": None,
-    "Active (30 days)": 30,
-    "Active (90 days)": 90,
-    "Active (1 year)": 365,
-}
-
-SORT_OPTIONS = {
-    "Relevance": SortOption.RELEVANCE,
-    "Median Views": SortOption.MEDIAN_VIEWS,
-    "Subscribers": SortOption.SUBSCRIBERS,
-    "Most Recent": SortOption.ACTIVITY,
-}
+from config import VIEW_PRESETS, SUBSCRIBER_PRESETS, ACTIVITY_PRESETS
+from youtube_api import YouTubeService
+from sorting import SortOption, SORT_OPTIONS, sort_channels
+from metrics import format_publish_interval, format_duration, get_views_to_subs_label, get_score_label
+from pipeline import search_creators, SearchError
 
 # ============================================================================
 # CACHED WRAPPER FUNCTIONS
 # ============================================================================
-
-@st.cache_data(show_spinner=False)
-def cached_search_videos(_service: YouTubeService, keyword: str, max_results: int = 50) -> List[Dict]:
-    """Cached wrapper for YouTube video search."""
-    return _service.search_videos(keyword, max_results)
-
-
-@st.cache_data(show_spinner=False)
-def cached_get_video_statistics(_service: YouTubeService, video_ids: List[str]) -> Dict[str, Dict]:
-    """Cached wrapper for video statistics."""
-    return _service.get_video_statistics(video_ids)
-
-
-@st.cache_data(show_spinner=False)
-def cached_get_channel_statistics(_service: YouTubeService, channel_ids: List[str]) -> Dict[str, Dict]:
-    """Cached wrapper for channel statistics."""
-    return _service.get_channel_statistics(channel_ids)
-
 
 @st.cache_data(show_spinner=False)
 def cached_get_channel_latest_videos(_service: YouTubeService, uploads_playlist_id: str, max_results: int = 10) -> List[Dict]:
@@ -455,66 +387,32 @@ def render_channel_detail(channel_data: Dict, service: YouTubeService):
 # ============================================================================
 
 def process_search(service: YouTubeService, keyword: str, filters: Dict) -> Dict[str, Dict]:
-    """Process search with given filters and return results."""
-    min_views, max_views = filters['view_range']
-    min_subs, max_subs = filters['subscriber_range']
-
-    all_channels = {}
-
+    """Process search with UI progress updates."""
     with st.status("Searching...", expanded=True) as status:
-        # Step 1: Search for videos
-        st.write("Searching for videos...")
-        videos = cached_search_videos(service, keyword)
-        if not videos:
-            st.error(f"No videos found for '{keyword}'")
-            status.update(label="No videos found", state="error")
+        def on_progress(msg: str):
+            st.write(msg)
+
+        try:
+            channels = search_creators(
+                service=service,
+                keyword=keyword,
+                view_range=filters['view_range'],
+                subscriber_range=filters['subscriber_range'],
+                activity_days=filters.get('activity_days'),
+                on_progress=on_progress,
+            )
+
+            if channels:
+                status.update(label=f"Found {len(channels)} creators", state="complete")
+            else:
+                status.update(label="No creators found", state="error")
+
+            return channels
+
+        except SearchError as e:
+            st.error(str(e))
+            status.update(label="Search failed", state="error")
             return {}
-        st.write(f"Found {len(videos)} videos")
-
-        # Step 2: Get video statistics
-        st.write("Fetching video statistics...")
-        video_ids = [v['video_id'] for v in videos]
-        video_stats = cached_get_video_statistics(service, video_ids)
-
-        # Step 3: Filter by view count
-        st.write("Filtering by view count...")
-        filtered_videos = filter_videos_by_views(videos, video_stats, min_views, max_views)
-        if not filtered_videos:
-            st.error(f"No videos found with {min_views:,}-{max_views:,} views")
-            status.update(label="No matching videos", state="error")
-            return {}
-        st.write(f"{len(filtered_videos)} videos match view criteria")
-
-        # Step 4: Get channel statistics
-        st.write("Fetching channel statistics...")
-        channel_ids = list(set(v['channel_id'] for v in filtered_videos))
-        channel_stats = cached_get_channel_statistics(service, channel_ids)
-
-        # Step 5: Filter by subscriber count
-        st.write("Filtering by subscribers...")
-        valid_channel_ids = filter_channels_by_subscribers(channel_ids, channel_stats, min_subs, max_subs)
-        filtered_videos = [v for v in filtered_videos if v['channel_id'] in valid_channel_ids]
-
-        if not filtered_videos:
-            st.error("No channels match subscriber criteria")
-            status.update(label="No matching channels", state="error")
-            return {}
-
-        # Step 6: Aggregate by channel
-        st.write("Aggregating results...")
-        keyword_channels = aggregate_channels(filtered_videos, channel_stats, keyword)
-        all_channels = merge_channels(all_channels, keyword_channels)
-
-        # Step 7: Filter by activity if specified
-        activity_days = filters.get('activity_days')
-        if activity_days:
-            st.write(f"Filtering by activity (last {activity_days} days)...")
-            all_channels = filter_channels_by_activity(all_channels, activity_days)
-
-        st.write(f"Found {len(all_channels)} creators")
-        status.update(label=f"Found {len(all_channels)} creators", state="complete")
-
-    return all_channels
 
 # ============================================================================
 # MAIN APPLICATION

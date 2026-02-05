@@ -1,1 +1,0 @@
-This repository is vibecoded. Please take that into account if you use it.
