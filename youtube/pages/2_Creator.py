@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 # Add parent directory to path for imports
@@ -25,9 +26,37 @@ from shared.state import init_session_state, get_service, require_selected_chann
 from shared.components import cached_get_channel_latest_videos
 
 
+def create_score_gauge(score: int) -> go.Figure:
+    """Create a plotly gauge chart for channel score."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        gauge={
+            'axis': {'range': [0, 100], 'tickwidth': 1},
+            'bar': {'color': "darkblue"},
+            'steps': [
+                {'range': [0, 40], 'color': "#ffcccc"},
+                {'range': [40, 60], 'color': "#fff3cd"},
+                {'range': [60, 100], 'color': "#d4edda"}
+            ],
+            'threshold': {
+                'line': {'color': "black", 'width': 2},
+                'thickness': 0.75,
+                'value': score
+            }
+        }
+    ))
+    fig.update_layout(
+        height=200,
+        margin=dict(l=20, r=20, t=30, b=10),
+    )
+    return fig
+
+
 def render_channel_header(channel_data: Dict):
-    """Render channel header with thumbnail and basic info."""
-    header_cols = st.columns([1, 4])
+    """Render channel header with thumbnail, basic info, and score gauge."""
+    header_cols = st.columns([1, 3, 2])
 
     with header_cols[0]:
         thumbnail_url = channel_data.get('thumbnail_url', '')
@@ -37,12 +66,6 @@ def render_channel_header(channel_data: Dict):
     with header_cols[1]:
         st.subheader(channel_data['channel_name'])
         st.markdown(f"[Visit Channel](https://youtube.com/channel/{channel_data['channel_id']})")
-
-        # Channel Score badge
-        score = channel_data.get('channel_score', 0)
-        score_label = get_score_label(score)
-        score_color = "green" if score >= 60 else "orange" if score >= 40 else "red"
-        st.markdown(f"**Overall Score:** :{score_color}[{score}/100 - {score_label}]")
 
         # Country and creation date info
         country = channel_data.get('country', '')
@@ -60,6 +83,13 @@ def render_channel_header(channel_data: Dict):
         if info_parts:
             st.caption(" | ".join(info_parts))
 
+    with header_cols[2]:
+        # Overall Score Gauge
+        score = channel_data.get('channel_score', 0)
+        score_label = get_score_label(score)
+        st.plotly_chart(create_score_gauge(score), width='stretch', key="score_gauge")
+        st.caption(f"Overall Score: {score_label}")
+
 
 def render_channel_description(channel_data: Dict):
     """Render channel description in an expander."""
@@ -70,9 +100,12 @@ def render_channel_description(channel_data: Dict):
 
 
 def render_channel_metrics(channel_data: Dict):
-    """Render channel metrics in organized rows."""
-    # Metrics row 1 - Channel Overview
-    col1, col2, col3, col4 = st.columns(4)
+    """Render channel metrics in organized sections."""
+    st.subheader("Statistics")
+
+    # Section 1 - Channel Overview
+    st.markdown("### Channel Overview")
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.metric("Subscribers", f"{channel_data['subscriber_count']:,}")
@@ -84,21 +117,17 @@ def render_channel_metrics(channel_data: Dict):
         total_views = channel_data.get('total_channel_views', 0)
         st.metric("Total Views", f"{total_views:,}")
 
+    st.divider()
+
+    # Section 2 - Publishing Activity
+    st.markdown("### Publishing Activity")
+    col4, col5, col6 = st.columns(3)
+
     with col4:
-        created = channel_data.get('created_at')
-        if created and isinstance(created, datetime):
-            st.metric("Joined", created.strftime('%b %Y'))
-        else:
-            st.metric("Joined", "N/A")
-
-    # Metrics row 2 - Activity
-    col5, col6, col7, col8 = st.columns(4)
-
-    with col5:
         interval = format_publish_interval(channel_data.get('publish_interval_days'))
         st.metric("Publish Frequency", interval)
 
-    with col6:
+    with col5:
         last_pub = channel_data.get('last_published')
         if last_pub:
             days_ago = (datetime.now(timezone.utc) - last_pub).days
@@ -106,31 +135,45 @@ def render_channel_metrics(channel_data: Dict):
         else:
             st.metric("Last Video", "N/A")
 
-    with col7:
+    with col6:
         avg_dur = channel_data.get('avg_duration', 0)
         st.metric("Avg Duration", format_duration(avg_dur))
 
-    with col8:
-        st.metric("Median Views", f"{channel_data.get('median_views', 0):,}")
+    st.divider()
 
-    # Metrics row 3 - Performance
-    st.subheader("Performance Metrics")
-    col9, col10, col11, col12 = st.columns(4)
+    # Section 3 - Performance Metrics
+    st.markdown("### Performance Metrics")
+
+    # Row 1: Engagement metrics
+    col7, col8, col9 = st.columns(3)
+    median_views = channel_data.get('median_views', 0)
+    median_likes = channel_data.get('median_likes', 0)
+    median_comments = channel_data.get('median_comments', 0)
+
+    with col7:
+        st.metric("Median Views", f"{median_views:,}")
+
+    with col8:
+        st.metric("Median Likes", f"{median_likes:,}")
 
     with col9:
+        st.metric("Median Comments", f"{median_comments:,}")
+
+    # Row 2: Ratios
+    col10, col11, col12 = st.columns(3)
+
+    with col10:
         ratio = channel_data.get('views_to_subs_ratio', 0)
         label = get_views_to_subs_label(ratio)
         st.metric("Views-to-Subs Ratio", f"{ratio:.1f}%", label)
 
-    with col10:
-        st.metric("Median Likes", f"{channel_data.get('median_likes', 0):,}")
-
     with col11:
-        st.metric("Median Comments", f"{channel_data.get('median_comments', 0):,}")
+        likes_ratio = (median_likes / median_views * 100) if median_views > 0 else 0
+        st.metric("Likes-to-Views Ratio", f"{likes_ratio:.2f}%")
 
     with col12:
-        country_display = channel_data.get('country', 'N/A')
-        st.metric("Country", country_display if country_display else "N/A")
+        comments_ratio = (median_comments / median_views * 100) if median_views > 0 else 0
+        st.metric("Comments-to-Views Ratio", f"{comments_ratio:.2f}%")
 
 
 def render_latest_videos(channel_data: Dict, service):
@@ -269,6 +312,8 @@ def main():
     # Render all sections
     render_channel_header(channel_data)
     render_channel_description(channel_data)
+
+    st.divider()
     render_channel_metrics(channel_data)
 
     st.divider()

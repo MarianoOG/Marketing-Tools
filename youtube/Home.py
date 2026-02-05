@@ -14,9 +14,9 @@ from typing import Dict
 
 import streamlit as st
 
+from config import VIEW_PRESETS, SUBSCRIBER_PRESETS
 from pipeline import search_creators, SearchError
 from shared.state import init_session_state, get_service, show_api_error
-from shared.components import render_filters
 
 
 def process_search(service, keyword: str, filters: Dict) -> Dict[str, Dict]:
@@ -69,19 +69,22 @@ def main():
         placeholder="e.g., tech reviews, cooking tutorials, fitness tips"
     )
 
-    filters = render_filters()
-
     if not keyword:
         st.info("Enter a search term above to discover creators.")
         return
 
     if st.button("Search", type="primary"):
-        channels = process_search(service, keyword, filters)
+        # Use default "Any" filters - filtering happens on Results page
+        default_filters = {
+            'view_range': VIEW_PRESETS["Any"],
+            'subscriber_range': SUBSCRIBER_PRESETS["Any"],
+            'activity_days': None,
+        }
+        channels = process_search(service, keyword, default_filters)
         if channels:
             # Store results and navigate to Results page
             st.session_state.search_results = channels
             st.session_state.search_keyword = keyword
-            st.session_state.filters = filters
             st.switch_page("pages/1_Results.py")
 
 

@@ -7,7 +7,13 @@ A collection of marketing automation tools. Each subdirectory is a standalone pr
 ```
 Marketing Tools/
 ├── youtube/          # Creator Discovery - Find YouTube creators for partnerships
-│   ├── creator_app.py    # Main Streamlit application
+│   ├── Home.py           # Main entry point (search page)
+│   ├── pages/            # Multi-page Streamlit pages
+│   │   ├── 1_Results.py  # Search results with filters
+│   │   └── 2_Creator.py  # Creator detail view
+│   ├── shared/           # Shared components
+│   │   ├── state.py      # Session state management
+│   │   └── components.py # Reusable UI components
 │   ├── youtube_api.py    # YouTube Data API integration
 │   ├── metrics.py        # Performance metric calculations
 │   ├── filters.py        # Search filtering logic
@@ -31,7 +37,7 @@ source .venv/bin/activate
 
 **YouTube Creator Discovery:**
 ```bash
-cd youtube && streamlit run creator_app.py
+cd youtube && streamlit run Home.py
 ```
 
 ## Workflow Guidelines

@@ -58,15 +58,16 @@ The tool calculates metrics that reveal true creator value:
 
 3. Run the application:
    ```bash
-   streamlit run creator_app.py
+   streamlit run Home.py
    ```
 
 ## How It Works
 
-1. **Search** — Enter a keyword related to your target niche
-2. **Filter** — Adjust view, subscriber, and activity filters to match your criteria
-3. **Review** — Browse the results table sorted by your preferred metric
-4. **Explore** — Click any channel for detailed performance data and video history
+The app uses a multi-page flow:
+
+1. **Home** — Enter a keyword related to your target niche and search
+2. **Results** — Filter by views, subscribers, and activity; sort by your preferred metric
+3. **Creator** — Click any channel to see detailed performance data, video history, and upload patterns
 
 ## API Usage
 

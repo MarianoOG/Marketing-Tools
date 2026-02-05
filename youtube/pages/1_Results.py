@@ -14,6 +14,7 @@ import streamlit as st
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from filters import filter_channels
 from metrics import format_publish_interval
 from sorting import sort_channels
 from shared.state import init_session_state, require_search_results
@@ -106,11 +107,14 @@ def main():
 
     st.divider()
 
-    # Sort and display results
-    sorted_channels = sort_channels(
+    # Filter and sort results
+    filtered_channels = filter_channels(
         st.session_state.search_results,
-        filters['sort_by']
+        filters['view_range'],
+        filters['subscriber_range'],
+        filters['activity_days'],
     )
+    sorted_channels = sort_channels(filtered_channels, filters['sort_by'])
 
     selected_id = render_overview_table(sorted_channels)
 

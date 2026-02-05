@@ -112,3 +112,51 @@ def filter_channels_by_activity(channels: Dict[str, Dict], max_days_since_publis
         cid: data for cid, data in channels.items()
         if data.get('last_published') and data['last_published'] >= cutoff
     }
+
+
+def filter_channels(
+    channels: Dict[str, Dict],
+    view_range: tuple,
+    subscriber_range: tuple,
+    activity_days: int = None
+) -> Dict[str, Dict]:
+    """
+    Filter aggregated channels by views, subscribers, and activity.
+    Works on the format returned by aggregate_channels().
+
+    Args:
+        channels: Dict mapping channel_id to aggregated channel data
+        view_range: (min_views, max_views) tuple
+        subscriber_range: (min_subs, max_subs) tuple
+        activity_days: Filter by activity within N days (optional)
+
+    Returns:
+        Filtered dict of channels matching all criteria
+    """
+    min_views, max_views = view_range
+    min_subs, max_subs = subscriber_range
+
+    filtered = {}
+    for cid, data in channels.items():
+        # Filter by median views
+        median_views = data.get('median_views', 0)
+        if not (min_views <= median_views <= max_views):
+            continue
+
+        # Filter by subscribers
+        subs = data.get('subscriber_count', 0)
+        if not (min_subs <= subs <= max_subs):
+            continue
+
+        # Filter by activity
+        if activity_days:
+            last_pub = data.get('last_published')
+            if not last_pub:
+                continue
+            cutoff = datetime.now(timezone.utc) - timedelta(days=activity_days)
+            if last_pub < cutoff:
+                continue
+
+        filtered[cid] = data
+
+    return filtered
