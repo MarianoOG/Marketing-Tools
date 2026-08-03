@@ -3,16 +3,19 @@
 Characters, objects and locations take uploaded reference images, which are
 written to a temporary directory for the length of the call and never saved.
 Scenes instead pick any number of existing assets out of the library.
+
+The generation itself runs on a background thread (see :mod:`shared.jobs`), so
+leaving this page cannot abandon a paid render. While a job is in flight the
+whole form is locked and the page waits; when it lands the user is sent to the
+library, which already lists the newest asset first.
 """
 
 from __future__ import annotations
 
-import mimetypes
 import re
 import sys
-import tempfile
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
 import streamlit as st
 
@@ -20,8 +23,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from generation import QUALITY
 from prompt_manager import ASSET_DIRS, STYLES
-from shared.library import Asset, REFERENCE_TYPES, list_assets, load_bytes
-from shared.state import get_generator, init_session_state
+from shared import jobs
+from shared.library import Asset, REFERENCE_TYPES, list_assets
+from shared.state import init_session_state
 
 #: Only the friendly spellings. ``ASPECT_RATIOS`` also holds the raw `16:9`,
 #: `1:1` and `9:16` keys, which would show up as duplicate options.
@@ -46,7 +50,7 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
-def render_form() -> Dict:
+def render_form(disabled: bool) -> Dict:
     """The whole input side of the page. Returns the raw field values."""
     asset_type = st.radio(
         "Asset type",
@@ -54,12 +58,15 @@ def render_form() -> Dict:
         format_func=str.capitalize,
         horizontal=True,
         key='asset_type',
+        disabled=disabled,
     )
 
     name = st.text_input(
         "Name",
         placeholder="fox_hero",
         help="Used for the filename. Spaces and punctuation become underscores.",
+        key='asset_name',
+        disabled=disabled,
     )
     description = st.text_area(
         "Description",
@@ -74,13 +81,19 @@ def render_form() -> Dict:
             else "The subject to design."
         ),
         height=120,
+        key='asset_description',
+        disabled=disabled,
     )
 
     style_col, ratio_col, quality_col, provider_col = st.columns(4)
-    style = style_col.selectbox("Style", list(STYLES))
-    aspect_ratio = ratio_col.selectbox("Aspect ratio", ASPECT_RATIO_OPTIONS)
-    quality = quality_col.selectbox("Quality", list(QUALITY))
-    provider = provider_col.selectbox("Provider", PROVIDER_OPTIONS)
+    style = style_col.selectbox("Style", list(STYLES), key='style', disabled=disabled)
+    aspect_ratio = ratio_col.selectbox(
+        "Aspect ratio", ASPECT_RATIO_OPTIONS, key='aspect_ratio', disabled=disabled
+    )
+    quality = quality_col.selectbox("Quality", list(QUALITY), key='quality', disabled=disabled)
+    provider = provider_col.selectbox(
+        "Provider", PROVIDER_OPTIONS, key='provider', disabled=disabled
+    )
 
     return {
         'asset_type': asset_type,
@@ -93,21 +106,23 @@ def render_form() -> Dict:
     }
 
 
-def render_upload_references() -> List:
+def render_upload_references(disabled: bool) -> None:
     """Uploader for character / object / location. Nothing here is saved."""
     st.subheader("Reference images")
     st.caption(
         "Optional. Used as inspiration for the world, palette and mood - never "
         "for the art style. These files are not saved."
     )
-    return st.file_uploader(
+    st.file_uploader(
         "Upload references",
         type=UPLOAD_TYPES,
         accept_multiple_files=True,
-    ) or []
+        key='uploads',
+        disabled=disabled,
+    )
 
 
-def render_library_references() -> List[Path]:
+def render_library_references(disabled: bool) -> None:
     """Multi-select the existing sheets a scene should reproduce."""
     st.subheader("Reference assets")
     st.caption(
@@ -128,6 +143,7 @@ def render_library_references() -> List[Path]:
                     options,
                     format_func=lambda a: a.label,
                     key=f"scene_refs_{asset_type}",
+                    disabled=disabled,
                 )
             )
 
@@ -135,112 +151,79 @@ def render_library_references() -> List[Path]:
         for column, asset in zip(st.columns(min(len(selected), 6)), selected):
             column.image(str(asset.path), caption=asset.label, width='stretch')
 
-    return [asset.path for asset in selected]
 
+def accept_job() -> None:
+    """Button callback: freeze everything the job needs, submit nothing.
 
-def generate(fields: Dict, references: Sequence[Path]) -> None:
-    """Run one generation and stash the outcome in session state.
+    Streamlit runs ``on_click`` before the rerun paints, so the next frame
+    already draws the button and the whole form disabled. That closes the window
+    in which a second click could start a second paid generation.
 
-    The result is normalised to ``{provider: Path | Exception}``: ``generate_asset``
-    returns a bare ``Path`` for a single provider and that dict for ``"both"``,
-    where a failing provider's exception sits in its slot so one outage never
-    discards the other image.
+    It also means the widgets are still *enabled* here, which is why the whole
+    snapshot - including the uploaded bytes - is taken now rather than read back
+    off the locked form on the run that submits.
     """
-    with st.status("Generating...", expanded=True) as status:
-        st.write(
-            f"{fields['provider']} · {fields['style']} · {fields['aspect_ratio']} · "
-            f"quality {fields['quality']}"
-            + (f" · {len(references)} reference(s)" if references else "")
-        )
-        try:
-            result = get_generator().generate_asset(
-                fields['asset_type'],
-                fields['name'],
-                fields['description'],
-                fields['style'],
-                reference_images=list(references),
-                aspect_ratio=fields['aspect_ratio'],
-                quality=fields['quality'],
-                provider=fields['provider'],
-            )
-        except Exception as exc:
-            st.session_state.last_results = {}
-            status.update(label="Generation failed", state="error")
-            st.error(str(exc))
-            return
+    state = st.session_state
 
-        results = result if isinstance(result, dict) else {fields['provider']: result}
-        st.session_state.last_results = results
-        st.session_state.last_asset_type = fields['asset_type']
-
-        failures = sum(1 for value in results.values() if isinstance(value, Exception))
-        if failures == len(results):
-            status.update(label="Generation failed", state="error")
-        else:
-            status.update(
-                label=f"Generated {len(results) - failures} image(s)", state="complete"
-            )
-
-    list_assets.clear()
-
-
-def run_generation(fields: Dict, uploads: List, library_refs: List[Path]) -> None:
-    """Validate, materialise uploaded references, and generate.
-
-    Uploads are written into a ``TemporaryDirectory`` that wraps the whole call.
-    The extension is preserved because Gemini reads the mime type off the
-    filename and OpenAI infers it from the multipart upload - a suffix-less file
-    would send a JPEG labelled as PNG. ``generate_both`` joins its thread pool
-    before returning, so every read has finished by the time the directory goes.
-    """
-    if uploads:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            paths = []
-            for index, upload in enumerate(uploads):
-                suffix = Path(upload.name).suffix.lower() or ".png"
-                path = Path(tmpdir) / f"reference_{index}{suffix}"
-                path.write_bytes(upload.getvalue())
-                paths.append(path)
-            generate(fields, paths)
+    asset_type = state.asset_type
+    blobs: List = []
+    library_refs: List[Path] = []
+    if asset_type == "scene":
+        library_refs = [
+            asset.path
+            for reference_type in REFERENCE_TYPES
+            for asset in state.get(f"scene_refs_{reference_type}") or []
+        ]
     else:
-        generate(fields, library_refs)
+        # ``getvalue`` needs the script thread and the live session, so the
+        # bytes are read here and the worker only ever sees plain data.
+        blobs = [(upload.name, upload.getvalue()) for upload in state.get('uploads') or []]
+
+    state.pending_job = {
+        'fields': {
+            'asset_type': asset_type,
+            'name': slugify(state.asset_name),
+            'description': state.asset_description.strip(),
+            'style': state.style,
+            'aspect_ratio': state.aspect_ratio,
+            'quality': state.quality,
+            'provider': state.provider,
+        },
+        'blobs': blobs,
+        'library_refs': library_refs,
+    }
+    state.job_error = None
+    state.job_notice = None
 
 
-def render_results() -> None:
-    """Show the last generation. Rendered from session state, never from the
-    button branch: ``st.download_button`` reruns the script on click, which would
-    otherwise evaluate the generate button as False and blank this whole panel.
-    """
-    results = st.session_state.get('last_results') or {}
-    if not results:
+@st.fragment(run_every=2)
+def watch_job() -> None:
+    """Poll the running job without rerunning the rest of the page."""
+    if not jobs.is_running():
+        # ``st.switch_page`` cannot be called from a fragment, so hand control
+        # back to ``main``, which collects the result and redirects.
+        st.rerun(scope="app")
         return
 
-    st.divider()
-    # Named, because the panel outlives a switch to another asset type.
-    last_type = st.session_state.get('last_asset_type')
-    st.subheader(f"Latest {last_type}" if last_type else "Latest generation")
-
-    for column, (provider, outcome) in zip(st.columns(len(results)), results.items()):
-        with column:
-            st.markdown(f"**{provider}**")
-            if isinstance(outcome, Exception):
-                st.error(str(outcome))
-                continue
-            st.image(str(outcome), width='stretch')
-            st.caption(outcome.name)
-            st.download_button(
-                "Download",
-                data=load_bytes(outcome, outcome.stat().st_mtime),
-                file_name=outcome.name,
-                mime=mimetypes.guess_type(outcome.name)[0] or "image/png",
-                key=f"download_result_{provider}",
-                width='stretch',
-            )
+    with st.status(f"Generating {jobs.current_label()}...", expanded=True):
+        st.write(
+            "Running in the background. You can leave this page - the image is "
+            "saved either way."
+        )
 
 
 def main() -> None:
     st.set_page_config(page_title="Create - Asset Library", page_icon="✨", layout="wide")
     init_session_state()
+
+    # Retire a job that finished while we were elsewhere, then redirect: the
+    # library lists the newest asset first, so it *is* the result view.
+    finished = jobs.collect()
+    if finished is not None and finished.error is None:
+        st.session_state.gallery_page = 0
+        st.switch_page("Home.py")
+
+    running = jobs.is_running() or st.session_state.pending_job is not None
 
     st.title("✨ Create an asset")
     st.caption("Characters, objects and locations are reference sheets; scenes are finished frames.")
@@ -249,15 +232,15 @@ def main() -> None:
         st.switch_page("Home.py")
 
     st.divider()
-    fields = render_form()
+    fields = render_form(running)
 
     st.divider()
-    uploads: List = []
-    library_refs: List[Path] = []
+    # Rendered for the UI only: ``accept_job`` reads the picked references out
+    # of session state, so nothing here has to survive to the submitting run.
     if fields['asset_type'] == "scene":
-        library_refs = render_library_references()
+        render_library_references(running)
     else:
-        uploads = render_upload_references()
+        render_upload_references(running)
 
     st.divider()
     name = slugify(fields['name'])
@@ -265,12 +248,30 @@ def main() -> None:
     ready = bool(name and description)
     if fields['name'] and not name:
         st.warning("That name has no usable characters - try letters or digits.")
-    if st.button("Generate", type="primary", disabled=not ready):
-        run_generation({**fields, 'name': name, 'description': description}, uploads, library_refs)
-    if not ready:
+    st.button(
+        "Generating..." if running else "Generate",
+        type="primary",
+        disabled=running or not ready,
+        on_click=accept_job,
+    )
+    if not ready and not running:
         st.caption("A name and a description are required.")
 
-    render_results()
+    # The real duplicate guard: idempotent however many times the callback ran.
+    # Submitted after the form is rendered, so the locked UI is already painted.
+    if st.session_state.pending_job is not None and not st.session_state.job_id:
+        try:
+            st.session_state.job_id = jobs.submit(**st.session_state.pending_job)
+        except Exception as exc:  # otherwise the form stays locked with no reason shown
+            st.session_state.job_error = str(exc)
+        st.session_state.pending_job = None
+        st.rerun()
+
+    if st.session_state.job_id:
+        watch_job()
+
+    if st.session_state.job_error:
+        st.error(st.session_state.job_error)
 
 
 if __name__ == '__main__':

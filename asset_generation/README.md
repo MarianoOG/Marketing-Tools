@@ -9,8 +9,8 @@ Banana 2").
   reference clauses. No I/O.
 - `generation.py` — API calls and file writing.
 - `Home.py` + `pages/` — a Streamlit UI over both: browse the library, generate
-  new assets, download and delete. `shared/` holds its state and file-scanning
-  helpers; neither core module imports Streamlit.
+  new assets, download and delete. `shared/` holds its state, file-scanning
+  helpers and the background job runner; neither core module imports Streamlit.
 
 ## Setup
 
@@ -45,6 +45,28 @@ form. References work differently per type, mirroring the module:
   `img/`.
 - **scene** — multi-select any number of existing characters, objects and
   locations from the library; their files are passed straight through.
+
+There is no results panel: finishing a generation sends you back to the library,
+which already lists the newest asset first.
+
+### Generations run in the background
+
+A render costs real money, so `shared/jobs.py` runs it on a thread pool that
+outlives the script run that started it (see the module docstring for why the
+process-wide registry, rather than session state, is the source of truth):
+
+- Clicking **Generate** locks the whole form through the button's `on_click`
+  callback, which fires *before* the rerun paints. One click is one generation —
+  a second click cannot start a second paid call.
+- Leaving the page, or closing the tab, does not cancel anything. The image is
+  still written into `img/`, and the library refreshes itself when it lands —
+  including in a session that never submitted the job.
+- The library shows an "N generations in progress" banner while any job is
+  running, and drops the new tile in as soon as it finishes.
+- A failure keeps you on **Create** with the error under the form and your
+  inputs intact. With `provider="both"`, one provider failing still counts as a
+  success — the other image is saved and you are redirected — but the dead
+  provider is named in a warning on the library.
 
 ## Usage
 

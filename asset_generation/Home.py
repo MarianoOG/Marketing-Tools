@@ -14,6 +14,7 @@ from typing import List
 import streamlit as st
 
 from prompt_manager import ASSET_DIRS
+from shared import jobs
 from shared.library import Asset, filter_assets, list_assets, load_bytes, delete_asset
 from shared.state import init_session_state
 
@@ -100,6 +101,22 @@ def render_tile(asset: Asset) -> None:
             st.rerun()
 
 
+@st.fragment(run_every=2)
+def watch_jobs() -> None:
+    """Wait for a generation started elsewhere without polling the whole grid.
+
+    The count comes from the process-wide registry rather than session state, so
+    this also covers a job whose Create tab was closed: when it lands, the app
+    rerun below reaches ``jobs.collect()``, which clears the ``list_assets``
+    cache, and the new tile appears without anyone clicking anything.
+    """
+    running = jobs.running_count()
+    if not running:
+        st.rerun(scope="app")
+        return
+    st.info(f"{running} generation{'s' if running > 1 else ''} in progress...")
+
+
 def render_grid(assets: List[Asset]) -> None:
     """Lay the tiles out in rows of :data:`COLUMNS`."""
     for row_start in range(0, len(assets), COLUMNS):
@@ -113,8 +130,23 @@ def main() -> None:
     st.set_page_config(page_title="Asset Library", page_icon="🎨", layout="wide")
     init_session_state()
 
+    # Retire any generation that landed while the user was standing here; this
+    # is what refreshes the listing cache before it is read below.
+    jobs.collect()
+
     st.title("🎨 Asset Library")
     st.caption("Every character, object, location and scene generated so far.")
+
+    # Both shown once: they report on the run that just ended, not on a state the
+    # library should keep nagging about.
+    if st.session_state.job_error:
+        st.warning(f"Last generation failed: {st.session_state.job_error}")
+        st.session_state.job_error = None
+    if st.session_state.job_notice:
+        st.warning(f"One provider failed: {st.session_state.job_notice}")
+        st.session_state.job_notice = None
+    if jobs.running_count():
+        watch_jobs()
 
     assets = list_assets()
     if not assets:
