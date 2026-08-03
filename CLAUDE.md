@@ -4,7 +4,7 @@ A collection of marketing automation tools. Each subdirectory is a standalone pr
 
 ## Project Structure
 
-```
+```text
 Marketing Tools/
 ├── youtube/          # Creator Discovery - Find YouTube creators for partnerships
 │   ├── Home.py           # Main entry point (search page)
@@ -47,11 +47,13 @@ source .venv/bin/activate
 ## Running Apps
 
 **YouTube Creator Discovery:**
+
 ```bash
 cd youtube && streamlit run Home.py
 ```
 
 **Asset Generation Studio:**
+
 ```bash
 cd asset_generation && streamlit run Home.py
 ```
