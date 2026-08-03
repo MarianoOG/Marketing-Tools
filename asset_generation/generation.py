@@ -19,12 +19,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from dotenv import load_dotenv
 from PIL import Image
 
-from prompt_manager import ASSET_DIRS, AssetType, build_prompt
+from prompt_manager import ASSET_DIRS, REFERENCE_STYLE_SLUG, AssetType, build_prompt
 
 IMG_DIR = Path(__file__).parent / "img"
 ENV_PATH = Path(__file__).parent / ".env"
@@ -335,7 +335,7 @@ class AssetImageGenerator:
         asset_type: AssetType,
         name: str,
         description: str,
-        style: str,
+        style: Optional[str],
         reference_images: Sequence[Path | str] | None = None,
         aspect_ratio: AspectRatio = "landscape",
         quality: Quality = "low",
@@ -345,10 +345,14 @@ class AssetImageGenerator:
 
         Files are named ``{name}_{style}_{uuid8}_{provider}`` inside the asset
         type's folder, so an openai run never overwrites a gemini one and a
-        listing stays readable. The uuid is minted once per call — re-rendering
-        the same name and style keeps every attempt instead of replacing the
-        previous one, and a ``provider="both"`` run shares one uuid across its two
-        images so the pair stays recognisable as a single generation.
+        listing stays readable. ``style=None`` — the styleless mode that reads its
+        look off the references — is written as
+        :data:`~prompt_manager.REFERENCE_STYLE_SLUG`, since the slot has to hold
+        something for the gallery to group on. The uuid is minted once per call —
+        re-rendering the same name and style keeps every attempt instead of
+        replacing the previous one, and a ``provider="both"`` run shares one uuid
+        across its two images so the pair stays recognisable as a single
+        generation.
 
         ``provider="both"`` returns the per-provider dict (it appends the provider
         suffix itself); a single provider returns its :class:`Path`.
@@ -357,11 +361,12 @@ class AssetImageGenerator:
         prompt = build_prompt(
             asset_type, description, style, with_references=bool(references)
         )
+        style_slug = style or REFERENCE_STYLE_SLUG
         uid = uuid.uuid4().hex[:8]
         if provider == "both":
             return self.generate_both(
                 prompt,
-                f"{name}_{style}_{uid}",
+                f"{name}_{style_slug}_{uid}",
                 asset_type,
                 aspect_ratio,
                 quality,
@@ -371,7 +376,7 @@ class AssetImageGenerator:
             return self._render(
                 provider,
                 prompt,
-                f"{name}_{style}_{uid}_{provider}",
+                f"{name}_{style_slug}_{uid}_{provider}",
                 asset_type,
                 aspect_ratio,
                 quality,
@@ -384,19 +389,19 @@ class AssetImageGenerator:
     # Per-type entry points. They differ only in the asset type they pass through
     # and share every keyword argument of :meth:`generate_asset`.
 
-    def generate_character(self, name: str, description: str, style: str, **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_character(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
         """Turnaround sheet: front, side and back on white."""
         return self.generate_asset("character", name, description, style, **kwargs)
 
-    def generate_object(self, name: str, description: str, style: str, **kwargs) -> Path | dict[str, Path | Exception]:
-        """Turnaround sheet: three orthographic views (X, Y, Z) on white."""
+    def generate_object(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
+        """Turnaround sheet: front and side orthographic views on white."""
         return self.generate_asset("object", name, description, style, **kwargs)
 
-    def generate_location(self, name: str, description: str, style: str, **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_location(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
         """Empty background plate — no characters anywhere in the frame."""
         return self.generate_asset("location", name, description, style, **kwargs)
 
-    def generate_scene(self, name: str, description: str, style: str, **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_scene(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
         """Finished frame. ``description`` is the situation being depicted; pass
         the character/object/location sheets as ``reference_images``."""
         return self.generate_asset("scene", name, description, style, **kwargs)

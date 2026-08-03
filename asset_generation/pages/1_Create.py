@@ -31,13 +31,21 @@ from shared.state import init_session_state
 #: `1:1` and `9:16` keys, which would show up as duplicate options.
 ASPECT_RATIO_OPTIONS = ("landscape", "square", "portrait")
 
-#: ``"both"`` is accepted by ``generate_asset`` but is not in any module
-#: constant, so this list is written out rather than read from one.
-PROVIDER_OPTIONS = ("both", "openai", "gemini")
+#: Every generation runs on both providers; the UI no longer offers a choice.
+#: ``generate_asset`` still accepts a single provider for API callers.
+PROVIDER = "both"
 
 ASSET_TYPE_OPTIONS = list(ASSET_DIRS)
 
 UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp"]
+
+#: ``build_prompt`` takes ``style=None`` to mean "the references define the
+#: style", so the selectbox carries a ``None`` option. Kept last so it is never
+#: the default: it is the one choice that cannot render on its own.
+STYLE_OPTIONS = list(STYLES) + [None]
+
+#: What the ``None`` option is called on screen, and in the captions that explain it.
+FOLLOW_LABEL = "Follow references"
 
 
 def slugify(name: str) -> str:
@@ -85,15 +93,18 @@ def render_form(disabled: bool) -> Dict:
         disabled=disabled,
     )
 
-    style_col, ratio_col, quality_col, provider_col = st.columns(4)
-    style = style_col.selectbox("Style", list(STYLES), key='style', disabled=disabled)
+    style_col, ratio_col, quality_col = st.columns(3)
+    style = style_col.selectbox(
+        "Style",
+        STYLE_OPTIONS,
+        format_func=lambda s: FOLLOW_LABEL if s is None else s,
+        key='style',
+        disabled=disabled,
+    )
     aspect_ratio = ratio_col.selectbox(
         "Aspect ratio", ASPECT_RATIO_OPTIONS, key='aspect_ratio', disabled=disabled
     )
     quality = quality_col.selectbox("Quality", list(QUALITY), key='quality', disabled=disabled)
-    provider = provider_col.selectbox(
-        "Provider", PROVIDER_OPTIONS, key='provider', disabled=disabled
-    )
 
     return {
         'asset_type': asset_type,
@@ -102,16 +113,37 @@ def render_form(disabled: bool) -> Dict:
         'style': style,
         'aspect_ratio': aspect_ratio,
         'quality': quality,
-        'provider': provider,
     }
 
 
-def render_upload_references(disabled: bool) -> None:
-    """Uploader for character / object / location. Nothing here is saved."""
+def has_references(asset_type: str) -> bool:
+    """Whether the form currently holds any reference image.
+
+    Branches on ``asset_type`` exactly as ``accept_job`` does, and for the same
+    reason: the keys of the other branch survive in session state, so a scene
+    would otherwise see uploads left behind by a character.
+
+    Only meaningful once the reference section has been rendered on this run.
+    """
+    state = st.session_state
+    if asset_type == "scene":
+        return any(state.get(f"scene_refs_{t}") for t in REFERENCE_TYPES)
+    return bool(state.get('uploads'))
+
+
+def render_upload_references(disabled: bool, follow: bool) -> None:
+    """Uploader for character / object / location. Nothing here is saved.
+
+    ``follow`` flips the caption: with no style picked these images are the
+    source of the art style rather than the one thing never taken from them.
+    """
     st.subheader("Reference images")
     st.caption(
-        "Optional. Used as inspiration for the world, palette and mood - never "
-        "for the art style. These files are not saved."
+        "Required here: the art style is copied from these images. "
+        "These files are not saved."
+        if follow
+        else "Optional. Used as inspiration for the world, palette and mood - "
+        "never for the art style. These files are not saved."
     )
     st.file_uploader(
         "Upload references",
@@ -122,12 +154,18 @@ def render_upload_references(disabled: bool) -> None:
     )
 
 
-def render_library_references(disabled: bool) -> None:
+def render_library_references(disabled: bool, follow: bool) -> None:
     """Multi-select the existing sheets a scene should reproduce."""
     st.subheader("Reference assets")
     st.caption(
         "Scenes treat these as authority: the designs are reproduced faithfully. "
         "Pick any number of characters, objects and locations."
+        + (
+            " With no style picked each one also keeps its own art style, so "
+            "the frame is not unified into one look."
+            if follow
+            else ""
+        )
     )
 
     selected: List[Asset] = []
@@ -187,7 +225,7 @@ def accept_job() -> None:
             'style': state.style,
             'aspect_ratio': state.aspect_ratio,
             'quality': state.quality,
-            'provider': state.provider,
+            'provider': PROVIDER,
         },
         'blobs': blobs,
         'library_refs': library_refs,
@@ -237,15 +275,20 @@ def main() -> None:
     st.divider()
     # Rendered for the UI only: ``accept_job`` reads the picked references out
     # of session state, so nothing here has to survive to the submitting run.
+    follow = fields['style'] is None
     if fields['asset_type'] == "scene":
-        render_library_references(running)
+        render_library_references(running, follow)
     else:
-        render_upload_references(running)
+        render_upload_references(running, follow)
 
     st.divider()
     name = slugify(fields['name'])
     description = fields['description'].strip()
-    ready = bool(name and description)
+    # With no style picked there is nothing to render from - ``build_prompt``
+    # rejects it without references, so the button is held rather than letting
+    # the job fail.
+    missing_references = follow and not has_references(fields['asset_type'])
+    ready = bool(name and description) and not missing_references
     if fields['name'] and not name:
         st.warning("That name has no usable characters - try letters or digits.")
     st.button(
@@ -254,8 +297,14 @@ def main() -> None:
         disabled=running or not ready,
         on_click=accept_job,
     )
-    if not ready and not running:
-        st.caption("A name and a description are required.")
+    if not running:
+        if not (name and description):
+            st.caption("A name and a description are required.")
+        if missing_references:
+            st.caption(
+                f"**{FOLLOW_LABEL}** takes the look from the references, so at "
+                "least one is required."
+            )
 
     # The real duplicate guard: idempotent however many times the callback ran.
     # Submitted after the form is rendered, so the locked UI is already painted.

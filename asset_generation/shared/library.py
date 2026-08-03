@@ -19,7 +19,7 @@ from typing import List, Optional
 import streamlit as st
 
 from generation import IMG_DIR
-from prompt_manager import ASSET_DIRS, STYLES
+from prompt_manager import ASSET_DIRS, REFERENCE_STYLE_SLUG, STYLES
 
 #: Extensions the two providers can produce, plus webp for uploaded material.
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -33,9 +33,12 @@ REFERENCE_TYPES = ("character", "object", "location")
 #: cleanly separates the current naming scheme from the legacy one.
 _UID_RE = re.compile(r"^[0-9a-f]{8}$")
 
-#: Longest first, so `watercolor_storybook` is matched before `storybook` could
-#: ever be considered a style on its own.
-_STYLES_BY_LENGTH = sorted(STYLES, key=len, reverse=True)
+#: Every token that can occupy the style slot of a filename: the style keys plus
+#: the slug a styleless (``style=None``) render is written under, which is not a
+#: key of ``STYLES`` and so has to be added by hand. Longest first, so
+#: `watercolor_storybook` is matched before `storybook` could ever be considered
+#: a style on its own.
+_STYLES_BY_LENGTH = sorted({*STYLES, REFERENCE_STYLE_SLUG}, key=len, reverse=True)
 
 _PROVIDERS = ("openai", "gemini")
 

@@ -37,8 +37,10 @@ style and provider, with a download and a delete behind each thumbnail. There is
 no database — the file tree is the store, read on demand into `st.cache_data`
 and re-scanned whenever a file is written or removed.
 
-**Create** (`pages/1_Create.py`) is the same arguments as `generate_asset`, as a
-form. References work differently per type, mirroring the module:
+**Create** (`pages/1_Create.py`) is the arguments of `generate_asset` as a form,
+minus the provider: every generation from the UI runs on both providers, so one
+click always produces two images to compare. The Python API below still takes
+`provider=`. References work differently per type, mirroring the module:
 
 - **character / object / location** — upload reference images. They are written
   to a temporary directory for the length of the call and **never saved** into
@@ -122,13 +124,14 @@ filename, asset_type, dpi=300)`.
 | Type | What it renders | References are treated as |
 | --- | --- | --- |
 | `character` | Turnaround sheet: front, side, back on white | inspiration |
-| `object` | Turnaround sheet: three orthographic views on white | inspiration |
+| `object` | Turnaround sheet: front and side orthographic views on white | inspiration |
 | `location` | Empty background plate, no figures anywhere | inspiration |
 | `scene` | Finished composed frame | **authority** — reproduce faithfully |
 
 Characters, objects and locations pull world, palette and mood from their
-references while the style always comes from the `style` argument. Scenes treat
-references as designs to reproduce exactly. See `REFERENCE_CLAUSES` in
+references while the style always comes from the `style` argument — unless that
+argument is `None`, which inverts it. Scenes treat references as designs to
+reproduce exactly. See `REFERENCE_CLAUSES` and `FOLLOW_REFERENCE_CLAUSES` in
 `prompt_manager.py`.
 
 ## Parameters
@@ -141,6 +144,25 @@ Ten animation styles, keys of `STYLES` in `prompt_manager.py`: `flat_2d`,
 
 Each expands to a long clause rather than a one-word label — "anime" alone
 leaves the model averaging over decades of unrelated work.
+
+Or pass `style=None` — the **Follow references** entry in the form — to name no
+style at all and hand that job to the attached images: match their medium,
+linework, shading and palette instead of imposing a look. For a scene it goes
+further — **each element keeps the style of the reference it came from**, and the
+frame is deliberately *not* unified into one house style or one colour grade.
+
+`None` also swaps the reference clause, because the normal ones for character,
+object and location say outright that the style argument overrides the
+references. Framing still wins over both: a styleless location is an empty plate
+however crowded its references are.
+
+Being styleless, it is meaningless without references — `build_prompt` raises
+rather than spend a call on it, and the **Create** form holds the Generate button
+until at least one reference is attached.
+
+The filename still needs something in its style slot, so these renders are
+written under the `follow_references` slug (`REFERENCE_STYLE_SLUG` in
+`prompt_manager.py`) and group under that name in the library's style filter.
 
 ### `aspect_ratio` — default `landscape`
 
