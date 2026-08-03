@@ -51,7 +51,7 @@ FOLLOW_LABEL = "Follow references"
 def slugify(name: str) -> str:
     """Reduce a typed name to something ``save_image`` will accept.
 
-    It rejects path separators outright, and both it and ``generate_both`` call
+    It rejects path separators outright, and the generator calls
     ``Path(filename).stem`` - which would quietly truncate ``fox.hero`` to
     ``fox``.
     """
@@ -59,7 +59,11 @@ def slugify(name: str) -> str:
 
 
 def render_form(disabled: bool) -> Dict:
-    """The whole input side of the page. Returns the raw field values."""
+    """The whole input side of the page.
+
+    Returns only the fields ``main`` needs for its own rendering decisions;
+    ``accept_job`` reads every field back off session state by widget key.
+    """
     asset_type = st.radio(
         "Asset type",
         ASSET_TYPE_OPTIONS,
@@ -101,34 +105,36 @@ def render_form(disabled: bool) -> Dict:
         key='style',
         disabled=disabled,
     )
-    aspect_ratio = ratio_col.selectbox(
+    ratio_col.selectbox(
         "Aspect ratio", ASPECT_RATIO_OPTIONS, key='aspect_ratio', disabled=disabled
     )
-    quality = quality_col.selectbox("Quality", list(QUALITY), key='quality', disabled=disabled)
+    quality_col.selectbox("Quality", list(QUALITY), key='quality', disabled=disabled)
 
     return {
         'asset_type': asset_type,
         'name': name,
         'description': description,
         'style': style,
-        'aspect_ratio': aspect_ratio,
-        'quality': quality,
     }
 
 
-def has_references(asset_type: str) -> bool:
-    """Whether the form currently holds any reference image.
+def selected_references(asset_type: str) -> List:
+    """The reference widgets' current values: library assets for a scene,
+    uploaded files otherwise.
 
-    Branches on ``asset_type`` exactly as ``accept_job`` does, and for the same
-    reason: the keys of the other branch survive in session state, so a scene
-    would otherwise see uploads left behind by a character.
-
-    Only meaningful once the reference section has been rendered on this run.
+    Branching on ``asset_type`` matters: the keys of the other branch survive in
+    session state, so a scene would otherwise see uploads left behind by a
+    character. Only meaningful once the reference section has been rendered on
+    this run.
     """
     state = st.session_state
     if asset_type == "scene":
-        return any(state.get(f"scene_refs_{t}") for t in REFERENCE_TYPES)
-    return bool(state.get('uploads'))
+        return [
+            asset
+            for reference_type in REFERENCE_TYPES
+            for asset in state.get(f"scene_refs_{reference_type}") or []
+        ]
+    return list(state.get('uploads') or [])
 
 
 def render_upload_references(disabled: bool, follow: bool) -> None:
@@ -204,18 +210,15 @@ def accept_job() -> None:
     state = st.session_state
 
     asset_type = state.asset_type
+    references = selected_references(asset_type)
     blobs: List = []
     library_refs: List[Path] = []
     if asset_type == "scene":
-        library_refs = [
-            asset.path
-            for reference_type in REFERENCE_TYPES
-            for asset in state.get(f"scene_refs_{reference_type}") or []
-        ]
+        library_refs = [asset.path for asset in references]
     else:
         # ``getvalue`` needs the script thread and the live session, so the
         # bytes are read here and the worker only ever sees plain data.
-        blobs = [(upload.name, upload.getvalue()) for upload in state.get('uploads') or []]
+        blobs = [(upload.name, upload.getvalue()) for upload in references]
 
     state.pending_job = {
         'fields': {
@@ -287,7 +290,7 @@ def main() -> None:
     # With no style picked there is nothing to render from - ``build_prompt``
     # rejects it without references, so the button is held rather than letting
     # the job fail.
-    missing_references = follow and not has_references(fields['asset_type'])
+    missing_references = follow and not selected_references(fields['asset_type'])
     ready = bool(name and description) and not missing_references
     if fields['name'] and not name:
         st.warning("That name has no usable characters - try letters or digits.")

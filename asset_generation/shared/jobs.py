@@ -86,34 +86,32 @@ def _run(
     user has walked away from. The extension is preserved because Gemini reads
     the mime type off the filename and OpenAI infers it from the multipart
     upload - a suffix-less file would send a JPEG labelled as PNG.
-    """
 
-    def generate(references: Sequence[Path]) -> Dict[str, Path | Exception]:
+    The form fills either ``blobs`` or ``library_refs``, never both; passing both
+    through would simply use both.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        references = list(library_refs)
+        for index, (filename, data) in enumerate(blobs):
+            suffix = Path(filename).suffix.lower() or ".png"
+            path = Path(tmpdir) / f"reference_{index}{suffix}"
+            path.write_bytes(data)
+            references.append(path)
+
         result = generator.generate_asset(
             fields['asset_type'],
             fields['name'],
             fields['description'],
             fields['style'],
-            reference_images=list(references),
+            reference_images=references,
             aspect_ratio=fields['aspect_ratio'],
             quality=fields['quality'],
             provider=fields['provider'],
         )
-        # ``generate_asset`` returns a bare Path for a single provider and the
-        # per-provider dict for "both"; jobs always carry the dict shape.
-        return result if isinstance(result, dict) else {fields['provider']: result}
 
-    if not blobs:
-        return generate(library_refs)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        paths = []
-        for index, (filename, data) in enumerate(blobs):
-            suffix = Path(filename).suffix.lower() or ".png"
-            path = Path(tmpdir) / f"reference_{index}{suffix}"
-            path.write_bytes(data)
-            paths.append(path)
-        return generate(paths)
+    # ``generate_asset`` returns a bare Path for a single provider and the
+    # per-provider dict for "both"; jobs always carry the dict shape.
+    return result if isinstance(result, dict) else {fields['provider']: result}
 
 
 def submit(fields: Dict, blobs: Sequence[Blob], library_refs: Sequence[Path]) -> str:

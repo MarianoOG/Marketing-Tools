@@ -9,9 +9,22 @@ The framing rules are the part that must never drift: characters and objects are
 *reference sheets* consumed by later animation steps, so their layout (white
 background, fixed set of views) is fixed here rather than left to the caller.
 
-A ``style`` of ``None`` inverts the first two steps: it names no style and hands
-that job to the attached images instead, which also means it swaps the reference
-clause for one that does not contradict it.
+The ``style=None`` mode
+-----------------------
+``style=None`` names no style at all and hands that job to the attached images.
+Because that inverts what the normal clauses say, it swaps in a parallel set so
+nothing in the composed prompt contradicts it:
+
+- style clause    -> :data:`FOLLOW_REFERENCES_CLAUSE`
+- reference clause-> :data:`FOLLOW_REFERENCE_CLAUSES` (the normal ones say the
+  style clause *overrides* the references — the exact opposite)
+- framing         -> :data:`FOLLOW_FRAMING` where one exists (only the scene: its
+  usual "one unified grade" sentence would fight per-element styling)
+
+Being styleless it is meaningless without references, so :func:`build_prompt`
+rejects that combination rather than spend a paid call on it. On disk these
+renders are written under :data:`REFERENCE_STYLE_SLUG`, since the filename's
+style slot still has to hold something the gallery can group on.
 """
 
 from __future__ import annotations
@@ -93,12 +106,8 @@ STYLES: dict[str, str] = {
     ),
 }
 
-#: Injected in place of a :data:`STYLES` clause when ``style`` is ``None``. It is
-#: not a style key: it names no style at all and hands that job to the reference
-#: images, so it is meaningless without them — :func:`build_prompt` refuses it
-#: when nothing is attached — and it needs its own reference clauses, since the
-#: normal ones for character, object and location say in as many words that the
-#: style clause *overrides* the references, which is the exact opposite.
+#: Stands in for the :data:`STYLES` clause when ``style`` is ``None``. Not a
+#: style key — see the module docstring.
 FOLLOW_REFERENCES_CLAUSE = (
     "Do not apply any predetermined art style to this image. The art style is "
     "defined entirely by the attached reference images: match their medium, "
@@ -108,9 +117,8 @@ FOLLOW_REFERENCES_CLAUSE = (
     "the fidelity of what the references show."
 )
 
-#: What a ``style=None`` render is called on disk. ``generate_asset`` stamps the
-#: style into every filename and the gallery groups on it, so the styleless case
-#: still needs a token — one that is deliberately *not* a :data:`STYLES` key.
+#: What a ``style=None`` render is called on disk. Deliberately *not* a
+#: :data:`STYLES` key.
 REFERENCE_STYLE_SLUG = "follow_references"
 
 #: The invariant part of a character prompt. These renders are turnaround sheets
@@ -250,11 +258,10 @@ REFERENCE_CLAUSES: dict[str, str] = {
 }
 
 
-#: Used in place of :data:`REFERENCE_CLAUSES` when ``style`` is ``None``.
-#: Character, object and location share one clause:
-#: the per-type differences in the normal clauses are all about what to *extract*
-#: from a mismatched reference, and that question disappears once the references
-#: are simply the source of the rendering.
+#: Character, object and location share one ``style=None`` clause: the per-type
+#: differences in :data:`REFERENCE_CLAUSES` are all about what to *extract* from a
+#: mismatched reference, and that question disappears once the references are
+#: simply the source of the rendering.
 _FOLLOW_SHEET_CLAUSE = (
     "The reference images are the authority for how this image is drawn: "
     "reproduce their medium, linework, shading, colour palette and level of "
@@ -292,8 +299,7 @@ FOLLOW_REFERENCE_CLAUSES: dict[str, str] = {
 }
 
 #: Framing overrides for ``style=None``. Only the scene needs one; the sheet
-#: layouts are style-independent, so they are taken from :data:`FRAMING` as usual
-#: and every named style's prompt is left untouched.
+#: layouts are style-independent and fall through to :data:`FRAMING`.
 FOLLOW_FRAMING: dict[str, str] = {"scene": SCENE_FRAMING_PER_ELEMENT}
 
 
@@ -315,13 +321,8 @@ def build_prompt(
     images. Character, object and location treat references as inspiration;
     scene treats them as authority.
 
-    ``style`` of ``None`` names no style and takes it from the references
-    instead: :data:`FOLLOW_REFERENCES_CLAUSE` stands in for the style clause, the
-    reference clause comes from :data:`FOLLOW_REFERENCE_CLAUSES`, and the framing
-    from :data:`FOLLOW_FRAMING` where one exists, so that nothing in the composed
-    prompt contradicts handing the art style to the references. It has no meaning
-    without them, so it is rejected outright rather than left to produce an
-    unstyled render on a paid call.
+    ``style=None`` takes the art style from the references instead of naming one,
+    and so requires at least one — see the module docstring.
     """
     if asset_type not in FRAMING:
         raise ValueError(

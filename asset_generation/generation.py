@@ -1,13 +1,12 @@
 """Asset image generation via OpenAI (gpt-image-2) and Gemini (Nano Banana 2).
 
-Both providers sit behind one interface. Every render is written under
-``img/<asset-type-dir>/`` and the methods return the :class:`Path` written.
-Prompts come from :mod:`prompt_manager`; attaching reference images routes
-OpenAI through ``images.edit`` and Gemini through multimodal content blocks.
+Both providers sit behind one interface: :meth:`AssetImageGenerator.generate_asset`
+and its four per-type wrappers. Prompts come from :mod:`prompt_manager`, renders
+are written under ``img/<asset-type-dir>/``, and the methods return the
+:class:`Path` written.
 
-OpenAI emits PNG, Gemini JPEG (the only mime type its API accepts). Bytes are
-stored provider-native — transcoding would inflate the file while baking in
-artifacts it cannot remove. Output is always 2K.
+OpenAI emits PNG, Gemini JPEG; bytes are stored provider-native and output is
+always 2K. See the README for why.
 """
 
 from __future__ import annotations
@@ -35,6 +34,10 @@ GEMINI_MODEL = "gemini-3.1-flash-image"
 AspectRatio = Literal["landscape", "square", "portrait", "16:9", "1:1", "9:16"]
 Quality = Literal["low", "medium", "high"]
 Provider = Literal["openai", "gemini"]
+
+#: What a generate call returns: one path, or one per provider for "both" — where
+#: a failed provider's slot holds its exception instead.
+RenderResult = Path | dict[str, Path | Exception]
 
 #: Gemini takes this string directly in `response_format`.
 IMAGE_SIZE = "2K"
@@ -212,13 +215,11 @@ class AssetImageGenerator:
                     }
                 )
 
-        # `thinking_level` is only sent for quality="high" — omitted entirely
-        # otherwise, so it has to be unpacked rather than passed as None. Typed
-        # loosely because `create` is heavily overloaded and a narrower dict makes
-        # the checker match the unpacked values against every other parameter.
-        #
-        # The SDK also types a `delivery` field, but the API rejects both of its
-        # values; the response comes back as inline base64 either way.
+        # `thinking_level` is only sent for quality="high", so it is unpacked
+        # rather than passed as None. Typed loosely: `create` is heavily
+        # overloaded and a narrower dict confuses the checker.
+        # (Do not add `delivery`: the SDK types it but the API rejects both of
+        # its values, and the response is inline base64 either way.)
         config: dict[str, Any] = {}
         if thinking_level:
             config["generation_config"] = {"thinking_level": thinking_level}
@@ -236,7 +237,7 @@ class AssetImageGenerator:
             **config,
         )
 
-        # Terminal success is reported as "completed" (and has been "succeeded"),
+        # Terminal success has been reported as both "completed" and "succeeded",
         # so image data — not the status — is the real success test.
         output = getattr(interaction, "output_image", None)
         if output is None or not output.data:
@@ -252,61 +253,37 @@ class AssetImageGenerator:
         asset_type: AssetType,
         aspect_ratio: AspectRatio,
         quality: Quality,
-        reference_images: Sequence[Path | str] | None,
+        references: list[Path],
     ) -> Path:
-        """Call one provider with a finished prompt, save the bytes, return the path."""
+        """Call one provider with a finished prompt, save the bytes, return the path.
+
+        ``references`` is already normalised: :meth:`generate_asset` is the only
+        entry point, so it calls :func:`_as_paths` once for both providers.
+        """
         ratio, openai_quality, thinking_level = _resolve(aspect_ratio, quality)
-        references = _as_paths(reference_images)
         if provider == "openai":
             data = self._openai_bytes(prompt, ratio, openai_quality, references)
         else:
             data = self._gemini_bytes(prompt, ratio, thinking_level, references)
         return save_image(data, filename, asset_type)
 
-    def generate_openai(
+    def _render_both(
         self,
         prompt: str,
         filename: str,
         asset_type: AssetType,
-        aspect_ratio: AspectRatio = "landscape",
-        quality: Quality = "low",
-        reference_images: Sequence[Path | str] | None = None,
-    ) -> Path:
-        """Generate one image with gpt-image-2 and save it."""
-        return self._render(
-            "openai", prompt, filename, asset_type, aspect_ratio, quality, reference_images
-        )
-
-    def generate_gemini(
-        self,
-        prompt: str,
-        filename: str,
-        asset_type: AssetType,
-        aspect_ratio: AspectRatio = "landscape",
-        quality: Quality = "low",
-        reference_images: Sequence[Path | str] | None = None,
-    ) -> Path:
-        """Generate one image with Gemini 3.1 Flash Image and save it."""
-        return self._render(
-            "gemini", prompt, filename, asset_type, aspect_ratio, quality, reference_images
-        )
-
-    def generate_both(
-        self,
-        prompt: str,
-        filename: str,
-        asset_type: AssetType,
-        aspect_ratio: AspectRatio = "landscape",
-        quality: Quality = "low",
-        reference_images: Sequence[Path | str] | None = None,
+        aspect_ratio: AspectRatio,
+        quality: Quality,
+        references: list[Path],
     ) -> dict[str, Path | Exception]:
-        """Generate the same prompt with both providers, concurrently.
+        """Render the same prompt with both providers, concurrently, and save both.
 
         Returns ``{"openai": Path, "gemini": Path}``. A provider that fails puts
         its exception in its slot rather than raising, so one failure never
         discards the other provider's image.
         """
         stem = Path(filename).stem
+        results: dict[str, Path | Exception] = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {
                 provider: pool.submit(
@@ -317,17 +294,15 @@ class AssetImageGenerator:
                     asset_type,
                     aspect_ratio,
                     quality,
-                    reference_images,
+                    references,
                 )
                 for provider in ("openai", "gemini")
             }
-
-        results: dict[str, Path | Exception] = {}
-        for provider, future in futures.items():
-            try:
-                results[provider] = future.result()
-            except Exception as exc:  # surfaced per-provider, not raised
-                results[provider] = exc
+            for provider, future in futures.items():
+                try:
+                    results[provider] = future.result()
+                except Exception as exc:  # surfaced per-provider, not raised
+                    results[provider] = exc
         return results
 
     def generate_asset(
@@ -340,19 +315,13 @@ class AssetImageGenerator:
         aspect_ratio: AspectRatio = "landscape",
         quality: Quality = "low",
         provider: Literal["openai", "gemini", "both"] = "both",
-    ) -> Path | dict[str, Path | Exception]:
+    ) -> RenderResult:
         """Build the prompt for ``asset_type`` and render it.
 
         Files are named ``{name}_{style}_{uuid8}_{provider}`` inside the asset
-        type's folder, so an openai run never overwrites a gemini one and a
-        listing stays readable. ``style=None`` — the styleless mode that reads its
-        look off the references — is written as
-        :data:`~prompt_manager.REFERENCE_STYLE_SLUG`, since the slot has to hold
-        something for the gallery to group on. The uuid is minted once per call —
-        re-rendering the same name and style keeps every attempt instead of
-        replacing the previous one, and a ``provider="both"`` run shares one uuid
-        across its two images so the pair stays recognisable as a single
-        generation.
+        type's folder. The uuid is minted once per call, so re-rendering the same
+        name and style keeps every attempt and a ``provider="both"`` run shares
+        one uuid across its pair; see the README.
 
         ``provider="both"`` returns the per-provider dict (it appends the provider
         suffix itself); a single provider returns its :class:`Path`.
@@ -361,10 +330,12 @@ class AssetImageGenerator:
         prompt = build_prompt(
             asset_type, description, style, with_references=bool(references)
         )
+        # style=None still needs a token in the filename's style slot for the
+        # gallery to group on.
         style_slug = style or REFERENCE_STYLE_SLUG
         uid = uuid.uuid4().hex[:8]
         if provider == "both":
-            return self.generate_both(
+            return self._render_both(
                 prompt,
                 f"{name}_{style_slug}_{uid}",
                 asset_type,
@@ -389,19 +360,27 @@ class AssetImageGenerator:
     # Per-type entry points. They differ only in the asset type they pass through
     # and share every keyword argument of :meth:`generate_asset`.
 
-    def generate_character(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_character(
+        self, name: str, description: str, style: Optional[str], **kwargs
+    ) -> RenderResult:
         """Turnaround sheet: front, side and back on white."""
         return self.generate_asset("character", name, description, style, **kwargs)
 
-    def generate_object(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_object(
+        self, name: str, description: str, style: Optional[str], **kwargs
+    ) -> RenderResult:
         """Turnaround sheet: front and side orthographic views on white."""
         return self.generate_asset("object", name, description, style, **kwargs)
 
-    def generate_location(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_location(
+        self, name: str, description: str, style: Optional[str], **kwargs
+    ) -> RenderResult:
         """Empty background plate — no characters anywhere in the frame."""
         return self.generate_asset("location", name, description, style, **kwargs)
 
-    def generate_scene(self, name: str, description: str, style: Optional[str], **kwargs) -> Path | dict[str, Path | Exception]:
+    def generate_scene(
+        self, name: str, description: str, style: Optional[str], **kwargs
+    ) -> RenderResult:
         """Finished frame. ``description`` is the situation being depicted; pass
         the character/object/location sheets as ``reference_images``."""
         return self.generate_asset("scene", name, description, style, **kwargs)
