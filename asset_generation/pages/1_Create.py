@@ -1,13 +1,14 @@
-"""Create - generate one asset from a description, a style and some references.
+"""Create - generate one or more assets from a description, a style and some references.
 
 Characters, objects and locations take uploaded reference images, which are
 written to a temporary directory for the length of the call and never saved.
 Scenes instead pick any number of existing assets out of the library.
 
 The generation itself runs on a background thread (see :mod:`shared.jobs`), so
-leaving this page cannot abandon a paid render. While a job is in flight the
-whole form is locked and the page waits; when it lands the user is sent to the
-library, which already lists the newest asset first.
+leaving this page cannot abandon a paid render. The form stays open after
+submitting, so several generations can run at once - a panel lists progress
+for every job this session has queued. Submitting the exact same request again
+while it is still running attaches to that job instead of starting another.
 """
 
 from __future__ import annotations
@@ -233,38 +234,48 @@ def accept_job() -> None:
         'blobs': blobs,
         'library_refs': library_refs,
     }
-    state.job_error = None
-    state.job_notice = None
 
 
 @st.fragment(run_every=2)
-def watch_job() -> None:
-    """Poll the running job without rerunning the rest of the page."""
-    if not jobs.is_running():
-        # ``st.switch_page`` cannot be called from a fragment, so hand control
-        # back to ``main``, which collects the result and redirects.
+def watch_jobs() -> None:
+    """Poll this session's jobs without rerunning the rest of the page."""
+    active = jobs.session_jobs()
+    if not active:
+        return
+    if any(job.done() for job in active):
+        # Hand control back to ``main``, which collects the result and clears
+        # the finished id - a fragment can't do that reconciliation itself.
+        # Any still-running jobs pick this fragment back up on the next rerun.
         st.rerun(scope="app")
         return
 
-    with st.status(f"Generating {jobs.current_label()}...", expanded=True):
-        st.write(
-            "Running in the background. You can leave this page - the image is "
-            "saved either way."
+    with st.container(border=True):
+        st.caption(
+            "Running in the background. You can leave this page or submit "
+            "another - each image is saved either way."
         )
+        # Every job here is still running: a finished one triggers the rerun
+        # above before this renders, so there is nothing to branch on.
+        for job in active:
+            st.write(f"⏳ {job.label} - generating...")
 
 
 def main() -> None:
     st.set_page_config(page_title="Create - Asset Library", page_icon="✨", layout="wide")
     init_session_state()
 
-    # Retire a job that finished while we were elsewhere, then redirect: the
-    # library lists the newest asset first, so it *is* the result view.
-    finished = jobs.collect()
-    if finished is not None and finished.error is None:
-        st.session_state.gallery_page = 0
-        st.switch_page("Home.py")
+    # Retire any of this session's jobs that finished while we were elsewhere.
+    # No redirect: other jobs may still be running, so the user stays here to
+    # watch them - "← Back to library" is the way out when they're ready.
+    for job in jobs.collect():
+        if job.error:
+            st.session_state.job_errors.append(f"{job.label}: {job.error}")
+        if job.warning:
+            st.session_state.job_notices.append(f"{job.label}: {job.warning}")
 
-    running = jobs.is_running() or st.session_state.pending_job is not None
+    # Only guards the one-frame window between a click and its submission -
+    # not "any job is running", since several may run at once.
+    running = st.session_state.pending_job is not None
 
     st.title("✨ Create an asset")
     st.caption("Characters, objects and locations are reference sheets; scenes are finished frames.")
@@ -311,19 +322,24 @@ def main() -> None:
 
     # The real duplicate guard: idempotent however many times the callback ran.
     # Submitted after the form is rendered, so the locked UI is already painted.
-    if st.session_state.pending_job is not None and not st.session_state.job_id:
+    if st.session_state.pending_job is not None:
         try:
-            st.session_state.job_id = jobs.submit(**st.session_state.pending_job)
+            job_id, deduped = jobs.submit(**st.session_state.pending_job)
+            if job_id not in st.session_state.job_ids:
+                st.session_state.job_ids.append(job_id)
+            if deduped:
+                st.toast("Already running - attached to the existing job instead of starting another.")
         except Exception as exc:  # otherwise the form stays locked with no reason shown
-            st.session_state.job_error = str(exc)
+            st.session_state.job_errors.append(str(exc))
         st.session_state.pending_job = None
         st.rerun()
 
-    if st.session_state.job_id:
-        watch_job()
+    if st.session_state.job_ids:
+        watch_jobs()
 
-    if st.session_state.job_error:
-        st.error(st.session_state.job_error)
+    for error in st.session_state.job_errors:
+        st.error(error)
+    st.session_state.job_errors = []
 
 
 if __name__ == '__main__':

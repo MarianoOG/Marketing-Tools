@@ -14,20 +14,26 @@ The registry, not ``st.session_state``, is the source of truth for "did a job
 land". Session state dies with the tab, while ``list_assets`` is a process-wide
 ``st.cache_data``: if the only record of a finished job lived in the session
 that started it, an image saved after the tab closed would stay invisible in the
-library forever. Session state keeps exactly one job fact - ``job_id``, i.e.
-whether *this* session is the one that should be shown the progress panel and
-redirected when it finishes.
+library forever. Session state keeps only which job ids - ``job_ids`` - belong
+to *this* session, i.e. which ones should show up in its progress panel.
+
+A session may have several jobs in flight at once - the pool has more than one
+worker, and the UI no longer locks the form while a job runs. Submitting the
+same request twice while the first is still running does not start a second
+paid render: :func:`submit` recognizes the duplicate and attaches the caller to
+the existing job instead.
 """
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import streamlit as st
 
@@ -37,6 +43,11 @@ from shared.state import get_generator
 
 #: An uploaded reference, read in the script thread: (filename, bytes).
 Blob = Tuple[str, bytes]
+
+#: Each job makes 2 provider calls, so this bounds outbound calls to 2x this
+#: within typical provider rate limits. Submissions beyond this queue inside
+#: the executor itself - no separate queue data structure needed.
+MAX_WORKERS = 4
 
 _LOCK = threading.Lock()
 
@@ -48,9 +59,12 @@ class Job:
     id: str
     label: str
     future: Future
+    #: Hash of the request (fields + references). Lets a second, identical
+    #: submission attach to this job instead of paying for a duplicate render.
+    dedup_key: str = ""
     reconciled: bool = False
     results: Dict[str, Path | Exception] = field(default_factory=dict)
-    #: Set only when the whole job produced nothing. Suppresses the redirect.
+    #: Set only when the whole job produced nothing.
     error: str | None = None
     #: Set when ``provider="both"`` and one of the two failed: an image did land,
     #: so the run counts as a success, but the other paid call is worth saying.
@@ -62,9 +76,8 @@ class Job:
 
 @st.cache_resource(show_spinner=False)
 def _executor() -> ThreadPoolExecutor:
-    """One pool for the whole process. Two workers: the UI allows one job per
-    session, but a second browser session should not queue behind the first."""
-    return ThreadPoolExecutor(max_workers=2, thread_name_prefix="generate")
+    """One pool for the whole process, shared by every session."""
+    return ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="generate")
 
 
 @st.cache_resource(show_spinner=False)
@@ -114,25 +127,58 @@ def _run(
     return result if isinstance(result, dict) else {fields['provider']: result}
 
 
-def submit(fields: Dict, blobs: Sequence[Blob], library_refs: Sequence[Path]) -> str:
+def _dedup_key(fields: Dict, blobs: Sequence[Blob], library_refs: Sequence[Path]) -> str:
+    """Hash a request so an identical one can be recognized while it runs.
+
+    Filenames are not part of the key - two uploads of the same image under
+    different names are still the same request. Order is preserved for both
+    blobs and library refs, since reference order can affect the prompt.
+    """
+    hasher = hashlib.sha256()
+    for key in sorted(fields):
+        hasher.update(f"{key}={fields[key]}\x00".encode())
+    for _, data in blobs:
+        hasher.update(hashlib.sha256(data).digest())
+    for path in library_refs:
+        hasher.update(str(path).encode())
+        hasher.update(b"\x00")
+    return hasher.hexdigest()
+
+
+def submit(
+    fields: Dict, blobs: Sequence[Blob], library_refs: Sequence[Path]
+) -> Tuple[str, bool]:
     """Start a generation on a pool thread and return its job id.
 
     ``blobs`` are the uploaded references, already read into bytes by the caller
     while it still had the script thread. ``get_generator`` is resolved here for
     the same reason: it is an ``st.cache_resource``, which a bare worker thread
     has no context for.
+
+    If an unfinished job already exists for the exact same request, no new
+    render is started - the returned id points at that job instead, and the
+    second element is ``True`` so the caller can say so. This is the guard
+    against paying twice for one render.
     """
     generator = get_generator()
-
-    job_id = uuid.uuid4().hex
-    label = f"{fields['name']} · {fields['asset_type']} · {fields['provider']}"
-    future = _executor().submit(
-        _run, generator, dict(fields), list(blobs), list(library_refs)
-    )
+    key = _dedup_key(fields, blobs, library_refs)
 
     with _LOCK:
-        _registry()[job_id] = Job(id=job_id, label=label, future=future)
-    return job_id
+        registry = _registry()
+        existing = next(
+            (job for job in registry.values() if job.dedup_key == key and not job.done()),
+            None,
+        )
+        if existing is not None:
+            return existing.id, True
+
+        job_id = uuid.uuid4().hex
+        label = f"{fields['name']} · {fields['asset_type']} · {fields['provider']}"
+        future = _executor().submit(
+            _run, generator, dict(fields), list(blobs), list(library_refs)
+        )
+        registry[job_id] = Job(id=job_id, label=label, future=future, dedup_key=key)
+    return job_id, False
 
 
 def running_count() -> int:
@@ -141,22 +187,12 @@ def running_count() -> int:
         return sum(1 for job in _registry().values() if not job.done())
 
 
-def is_running() -> bool:
-    """Whether *this* session is waiting on a job."""
-    job_id = st.session_state.get('job_id')
-    if not job_id:
-        return False
+def session_jobs() -> List[Job]:
+    """This session's jobs still in the registry, running or freshly finished."""
+    ids = st.session_state.get('job_ids', [])
     with _LOCK:
-        job = _registry().get(job_id)
-    return job is not None and not job.done()
-
-
-def current_label() -> str:
-    """Label of this session's job, for the progress panel."""
-    job_id = st.session_state.get('job_id')
-    with _LOCK:
-        job = _registry().get(job_id) if job_id else None
-    return job.label if job else "Generating..."
+        registry = _registry()
+        return [registry[job_id] for job_id in ids if job_id in registry]
 
 
 def _outcome(job: Job) -> None:
@@ -184,15 +220,17 @@ def _outcome(job: Job) -> None:
         job.warning = text
 
 
-def collect() -> Job | None:
+def collect() -> List[Job]:
     """Retire finished jobs. Call at the top of every page.
 
     Any finished job is reconciled, whichever session submitted it, so the
     ``list_assets`` cache is refreshed even for an image that landed after its
-    tab was closed. The return value is this session's job, if it is the one that
-    just finished - the caller uses it to decide whether to redirect.
+    tab was closed. The return value is this session's jobs that finished on
+    this call, so the caller can report each one's error or warning - several
+    can land in the same poll now that a session may have more than one job
+    in flight.
     """
-    session_job_id = st.session_state.get('job_id')
+    session_ids = list(st.session_state.get('job_ids', []))
 
     with _LOCK:
         registry = _registry()
@@ -200,23 +238,16 @@ def collect() -> Job | None:
         for job in finished:
             job.reconciled = True
             registry.pop(job.id, None)
-        # A job id with no entry means the server restarted or the cache was
-        # cleared. Drop the id rather than leaving the form disabled forever.
-        orphaned = bool(session_job_id) and session_job_id not in registry
+        # An id with no entry left means it was reconciled elsewhere (another
+        # tab, or above) or the server restarted. Either way, stop tracking it.
+        still_registered = {job_id for job_id in session_ids if job_id in registry}
 
     for job in finished:
         _outcome(job)
     if finished:
         list_assets.clear()
 
-    mine = next((job for job in finished if job.id == session_job_id), None)
-    if mine is not None:
-        st.session_state.job_id = None
-        st.session_state.job_error = mine.error
-        st.session_state.job_notice = mine.warning
-        return mine
-    if orphaned:
-        # Also the two-tab case: another session reconciled our job first, so we
-        # lose the redirect and just unlock. Single-job semantics make it rare.
-        st.session_state.job_id = None
-    return None
+    st.session_state.job_ids = [job_id for job_id in session_ids if job_id in still_registered]
+
+    finished_ids = set(session_ids)
+    return [job for job in finished if job.id in finished_ids]

@@ -48,27 +48,33 @@ click always produces two images to compare. The Python API below still takes
 - **scene** — multi-select any number of existing characters, objects and
   locations from the library; their files are passed straight through.
 
-There is no results panel: finishing a generation sends you back to the library,
-which already lists the newest asset first.
+The form stays open after you hit **Generate**, so you can queue up several
+assets in a row instead of waiting on each one — a panel on the page lists
+progress for every job you've queued.
 
-### Generations run in the background
+### Generations run in the background, several at once
 
 A render costs real money, so `shared/jobs.py` runs it on a thread pool that
 outlives the script run that started it (see the module docstring for why the
 process-wide registry, rather than session state, is the source of truth):
 
-- Clicking **Generate** locks the whole form through the button's `on_click`
-  callback, which fires *before* the rerun paints. One click is one generation —
-  a second click cannot start a second paid call.
+- The pool runs up to `MAX_WORKERS` (4) generations at once, each of which
+  makes 2 provider calls — submissions beyond that queue automatically inside
+  the pool. Clicking **Generate** only locks the form for the instant between
+  the click and its submission, so a second click can't double-submit *that*
+  click, but a new click right after is a new, independent job.
+- Submitting the exact same request (same fields and references) while an
+  identical one is still running does not start a second paid call — it
+  attaches to the job already in flight instead.
 - Leaving the page, or closing the tab, does not cancel anything. The image is
   still written into `img/`, and the library refreshes itself when it lands —
   including in a session that never submitted the job.
 - The library shows an "N generations in progress" banner while any job is
-  running, and drops the new tile in as soon as it finishes.
-- A failure keeps you on **Create** with the error under the form and your
-  inputs intact. With `provider="both"`, one provider failing still counts as a
-  success — the other image is saved and you are redirected — but the dead
-  provider is named in a warning on the library.
+  running, and drops each new tile in as soon as it finishes.
+- A failure keeps you on **Create**, with the error listed under the form and
+  your inputs intact. With `provider="both"`, one provider failing still counts
+  as a success — the other image is saved — but the dead provider is named in
+  a warning.
 
 ## Usage
 
