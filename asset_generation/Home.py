@@ -132,19 +132,23 @@ def main() -> None:
 
     # Retire any generation that landed while the user was standing here; this
     # is what refreshes the listing cache before it is read below.
-    jobs.collect()
+    for job in jobs.collect():
+        if job.error:
+            st.session_state.job_errors.append(f"{job.label}: {job.error}")
+        if job.warning:
+            st.session_state.job_notices.append(f"{job.label}: {job.warning}")
 
     st.title("🎨 Asset Library")
     st.caption("Every character, object, location and scene generated so far.")
 
-    # Both shown once: they report on the run that just ended, not on a state the
+    # Shown once each: they report on runs that just ended, not on a state the
     # library should keep nagging about.
-    if st.session_state.job_error:
-        st.warning(f"Last generation failed: {st.session_state.job_error}")
-        st.session_state.job_error = None
-    if st.session_state.job_notice:
-        st.warning(f"One provider failed: {st.session_state.job_notice}")
-        st.session_state.job_notice = None
+    for error in st.session_state.job_errors:
+        st.warning(f"Generation failed: {error}")
+    st.session_state.job_errors = []
+    for notice in st.session_state.job_notices:
+        st.warning(f"One provider failed: {notice}")
+    st.session_state.job_notices = []
     if jobs.running_count():
         watch_jobs()
 
