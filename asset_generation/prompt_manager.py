@@ -9,6 +9,11 @@ The framing rules are the part that must never drift: characters and objects are
 *reference sheets* consumed by later animation steps, so their layout (white
 background, fixed set of views) is fixed here rather than left to the caller.
 
+Framing is composed *after* the style clause, so it has the last word on colour
+and lighting. Where that would contradict the chosen style — a monochrome
+line-only style against a framing that asks for a colour grade —
+:data:`STYLE_FRAMING` swaps in a variant for that ``(style, asset_type)`` pair.
+
 The ``style=None`` mode
 -----------------------
 ``style=None`` names no style at all and hands that job to the attached images.
@@ -104,6 +109,25 @@ STYLES: dict[str, str] = {
         "depth layers casting small soft drop shadows onto the layer beneath, matte "
         "paper surface."
     ),
+    "ligne_claire_color": (
+        "Ligne claire children's book illustration style in the Tintin and Hergé "
+        "tradition: bold uniform-weight black outlines around every object and "
+        "shape, flat solid fills with no gradients, no soft shading, no painterly "
+        "texture and no photorealistic lighting. Real locations and objects stay "
+        "clearly recognisable in their proportions and layout but are rendered as "
+        "clean illustration, with simplified textures — wood grain as a few clean "
+        "lines, foliage as solid rounded masses, ground as one flat tone with "
+        "minimal detail. Warm inviting palette, high contrast, evenly lit with no "
+        "dramatic shadow work. Print-ready flat illustration, not a render."
+    ),
+    "ligne_claire_lineart": (
+        "Pure ligne claire line art: black outlines only on a white background, "
+        "with nothing filled in, no shading, no crosshatching and no gradients. "
+        "Uniform line weight throughout. Every shape is defined entirely by clean "
+        "confident black contour lines, so objects and locations stay clearly "
+        "recognisable by silhouette and structure alone. Ready for print or "
+        "colouring-book use."
+    ),
 }
 
 #: Stands in for the :data:`STYLES` clause when ``style`` is ``None``. Not a
@@ -154,15 +178,23 @@ OBJECT_FRAMING = (
 
 #: Locations are background plates that characters get composited over later, so
 #: the "no people" instruction is repeated several ways on purpose — it is the
-#: single constraint these renders most often break.
-LOCATION_FRAMING = (
+#: single constraint these renders most often break. Split around its one
+#: style-dependent sentence, the way the scene framing is: see
+#: :data:`LOCATION_FRAMING_MONOCHROME`.
+_LOCATION_COMPOSITION = (
     "Render this as an empty background plate for animation. The environment is "
     "completely unoccupied: no characters, no people, no figures, no crowds, no "
     "animals, and no foreground subject of any kind anywhere in the frame. Wide "
     "establishing view of the space itself with a consistent single-point "
-    "perspective and a clear horizon. Light the environment as a usable backdrop, "
-    "readable across the whole frame with nothing blown out and nothing crushed "
-    "to black. No text, no signage lettering, no watermarks, no borders."
+    "perspective and a clear horizon. "
+)
+_LOCATION_TAIL = "No text, no signage lettering, no watermarks, no borders."
+
+LOCATION_FRAMING = (
+    _LOCATION_COMPOSITION
+    + "Light the environment as a usable backdrop, readable across the whole "
+    "frame with nothing blown out and nothing crushed to black. "
+    + _LOCATION_TAIL
 )
 
 #: Scenes are finished frames rather than reference sheets, so the framing is
@@ -195,6 +227,39 @@ FRAMING: dict[str, str] = {
     "object": OBJECT_FRAMING,
     "location": LOCATION_FRAMING,
     "scene": SCENE_FRAMING,
+}
+
+#: The sentence a monochrome line-only style puts where the colour framings talk
+#: about lighting and grade. Both of those fight a black-line-on-white look head
+#: on, and framing is composed *after* the style clause, so they would have the
+#: last word — a contradiction is worse than either instruction alone.
+_MONOCHROME_RENDERING = (
+    "Describe the whole frame with black contour lines alone: depth and "
+    "separation come from overlap, scale and line, never from tone, fill or "
+    "shadow. "
+)
+
+#: :data:`LOCATION_FRAMING` with its lighting sentence swapped out — that one
+#: asks for nothing crushed to black, which is exactly what solid black contours
+#: on white are.
+LOCATION_FRAMING_MONOCHROME = (
+    _LOCATION_COMPOSITION + _MONOCHROME_RENDERING + _LOCATION_TAIL
+)
+
+#: :data:`SCENE_FRAMING` with its unified-grade sentence swapped out. Distinct
+#: from :data:`SCENE_FRAMING_PER_ELEMENT`, which drops that sentence for the
+#: opposite reason (per-element styling) and belongs to ``style=None``.
+SCENE_FRAMING_MONOCHROME = (
+    _SCENE_COMPOSITION + _MONOCHROME_RENDERING + _SCENE_TAIL
+)
+
+#: ``(style, asset_type)`` -> the framing that replaces :data:`FRAMING` for that
+#: pair. Only the styles whose look contradicts a framing constant need an entry;
+#: character and object sheets are already white-background and flat-lit, so they
+#: fall through for every style.
+STYLE_FRAMING: dict[tuple[str, str], str] = {
+    ("ligne_claire_lineart", "location"): LOCATION_FRAMING_MONOCHROME,
+    ("ligne_claire_lineart", "scene"): SCENE_FRAMING_MONOCHROME,
 }
 
 #: How the reference images are meant to be *used* — and this differs sharply by
@@ -342,7 +407,11 @@ def build_prompt(
             "one reference image is required"
         )
 
-    framing = FOLLOW_FRAMING.get(asset_type) if follow else None
+    framing = (
+        FOLLOW_FRAMING.get(asset_type)
+        if follow
+        else STYLE_FRAMING.get((style, asset_type))
+    )
     style_clause = FOLLOW_REFERENCES_CLAUSE if follow else STYLES[style]
     parts = [description.strip(), style_clause, framing or FRAMING[asset_type]]
     if with_references:
