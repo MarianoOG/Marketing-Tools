@@ -31,7 +31,7 @@ from typing import Dict, Sequence, Tuple
 
 import streamlit as st
 
-from generation import AssetImageGenerator
+from generation import DEFAULT_WORLD, AssetImageGenerator
 from shared.library import list_assets
 from shared.state import get_generator
 
@@ -107,6 +107,9 @@ def _run(
             aspect_ratio=fields['aspect_ratio'],
             quality=fields['quality'],
             provider=fields['provider'],
+            # Tolerated rather than required: a snapshot taken by an older build
+            # would otherwise fail inside the worker with a bare KeyError.
+            world=fields.get('world', DEFAULT_WORLD),
         )
 
     # ``generate_asset`` returns a bare Path for a single provider and the
@@ -125,7 +128,10 @@ def submit(fields: Dict, blobs: Sequence[Blob], library_refs: Sequence[Path]) ->
     generator = get_generator()
 
     job_id = uuid.uuid4().hex
-    label = f"{fields['name']} · {fields['asset_type']} · {fields['provider']}"
+    label = (
+        f"{fields['name']} · {fields['asset_type']} · "
+        f"{fields.get('world', DEFAULT_WORLD)} · {fields['provider']}"
+    )
     future = _executor().submit(
         _run, generator, dict(fields), list(blobs), list(library_refs)
     )

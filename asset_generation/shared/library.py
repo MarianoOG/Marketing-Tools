@@ -1,8 +1,9 @@
 """Asset Library - read the img/ tree as the one source of truth.
 
 There is no database. Every generated file already carries its own metadata in
-its name (``{name}_{style}_{uuid8}_{provider}``), so the listing is a directory
-scan plus a filename parse, held in ``st.cache_data`` and cleared whenever the
+its name (``{name}_{style}_{uuid8}_{provider}``) and its world in the folder
+above its type (``img/<world>/<asset-type-dir>/``), so the listing is a directory
+walk plus a filename parse, held in ``st.cache_data`` and cleared whenever the
 tree changes.
 
 Files written before the uuid was introduced use ``{name}_{style}_{provider}``
@@ -20,6 +21,7 @@ import streamlit as st
 
 from generation import IMG_DIR
 from prompt_manager import ASSET_DIRS, REFERENCE_STYLE_SLUG, STYLES
+from shared.worlds import list_worlds
 
 #: Extensions the two providers can produce, plus webp for uploaded material.
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -54,6 +56,8 @@ class Asset:
 
     path: Path
     asset_type: str
+    #: The folder above the asset type. Read off the path, never off the name.
+    world: str
     name: str
     style: str
     provider: str
@@ -67,13 +71,18 @@ class Asset:
         return " · ".join(parts)
 
 
-def parse_stem(stem: str, asset_type: str, path: Path, mtime: float) -> Asset:
+def parse_stem(
+    stem: str, asset_type: str, world: str, path: Path, mtime: float
+) -> Asset:
     """Read ``{name}_{style}_{uuid8}_{provider}`` back into an :class:`Asset`.
 
     Parsed right to left, because the name is the only part that may itself
     contain underscores. Anything that does not fit - a hand-dropped file, a
     scheme from the future - degrades to a name-only asset rather than being
     hidden from the gallery.
+
+    ``world`` is passed in rather than parsed: it lives in the path, which is
+    exactly what keeps this parse unambiguous for legacy uuid-less filenames.
     """
     remainder = stem
     provider = ""
@@ -100,6 +109,7 @@ def parse_stem(stem: str, asset_type: str, path: Path, mtime: float) -> Asset:
     return Asset(
         path=path,
         asset_type=asset_type,
+        world=world,
         name=remainder or stem,
         style=style,
         provider=provider,
@@ -109,23 +119,30 @@ def parse_stem(stem: str, asset_type: str, path: Path, mtime: float) -> Asset:
 
 
 @st.cache_data(show_spinner=False)
-def list_assets(asset_type: Optional[str] = None) -> List[Asset]:
-    """Every asset on disk, newest first. ``None`` means all four types.
+def list_assets(
+    asset_type: Optional[str] = None, world: Optional[str] = None
+) -> List[Asset]:
+    """Every asset on disk, newest first. ``None`` means every type / every world.
 
-    Cached, so call ``list_assets.clear()`` after writing or deleting a file.
+    Cached, so call ``list_assets.clear()`` after writing, moving or deleting a
+    file - including after a world is renamed or deleted.
     """
     types = [asset_type] if asset_type else list(ASSET_DIRS)
+    worlds = [world] if world else list_worlds()
     assets: List[Asset] = []
-    for type_name in types:
-        directory = IMG_DIR / ASSET_DIRS[type_name]
-        if not directory.is_dir():
-            continue
-        for path in directory.iterdir():
-            if path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file():
+    for world_name in worlds:
+        for type_name in types:
+            directory = IMG_DIR / world_name / ASSET_DIRS[type_name]
+            if not directory.is_dir():
                 continue
-            assets.append(
-                parse_stem(path.stem, type_name, path, path.stat().st_mtime)
-            )
+            for path in directory.iterdir():
+                if path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file():
+                    continue
+                assets.append(
+                    parse_stem(
+                        path.stem, type_name, world_name, path, path.stat().st_mtime
+                    )
+                )
     return sorted(assets, key=lambda a: a.mtime, reverse=True)
 
 
@@ -152,6 +169,7 @@ def filter_assets(
     asset_type: Optional[str] = None,
     style: Optional[str] = None,
     provider: Optional[str] = None,
+    world: Optional[str] = None,
 ) -> List[Asset]:
     """Narrow a listing. ``None`` on any field means "no constraint"."""
     return [
@@ -160,4 +178,5 @@ def filter_assets(
         if (asset_type is None or asset.asset_type == asset_type)
         and (style is None or asset.style == style)
         and (provider is None or asset.provider == provider)
+        and (world is None or asset.world == world)
     ]

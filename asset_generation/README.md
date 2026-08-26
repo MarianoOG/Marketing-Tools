@@ -9,8 +9,9 @@ Banana 2").
   reference clauses. No I/O.
 - `generation.py` — API calls and file writing.
 - `Home.py` + `pages/` — a Streamlit UI over both: browse the library, generate
-  new assets, download and delete. `shared/` holds its state, file-scanning
-  helpers and the background job runner; neither core module imports Streamlit.
+  new assets, download, move between worlds and delete. `shared/` holds its
+  state, the world layer, file-scanning helpers and the background job runner;
+  neither core module imports Streamlit.
 
 ## Setup
 
@@ -32,10 +33,14 @@ OPENAI_API_KEY=...
 cd asset_generation && streamlit run Home.py
 ```
 
-**Asset Library** (`Home.py`) lists everything under `img/`, filtered by type,
-style and provider, with a download and a delete behind each thumbnail. There is
-no database — the file tree is the store, read on demand into `st.cache_data`
-and re-scanned whenever a file is written or removed.
+**Asset Library** (`Home.py`) lists everything in the active world, filtered by
+type, style and provider, with a download, a move and a delete behind each
+thumbnail. There is no database — the file tree is the store, read on demand
+into `st.cache_data` and re-scanned whenever a file is written or removed.
+
+Tick the checkbox under any thumbnails to move or duplicate them to another
+world in one go. The selection survives paging and filtering, and is dropped
+when you switch worlds.
 
 **Create** (`pages/1_Create.py`) is the arguments of `generate_asset` as a form,
 minus the provider: every generation from the UI runs on both providers, so one
@@ -46,7 +51,7 @@ click always produces two images to compare. The Python API below still takes
   to a temporary directory for the length of the call and **never saved** into
   `img/`.
 - **scene** — multi-select any number of existing characters, objects and
-  locations from the library; their files are passed straight through.
+  locations **from the active world**; their files are passed straight through.
 
 There is no results panel: finishing a generation sends you back to the library,
 which already lists the newest asset first.
@@ -91,8 +96,8 @@ gen.generate_scene(
     "the fox hero holds the lantern up in the night market",
     "anime_cel",
     reference_images=[
-        "img/characters/fox_hero_flat_2d_3f9c1a02_openai.png",
-        "img/objects/lantern_low_poly_3d_b71e4d58_openai.png",
+        "img/default/characters/fox_hero_flat_2d_3f9c1a02_openai.png",
+        "img/default/objects/lantern_low_poly_3d_b71e4d58_openai.png",
     ],
     quality="high",
 )
@@ -100,12 +105,12 @@ gen.generate_scene(
 
 All four wrappers delegate to `generate_asset(asset_type, name, description,
 style, ...)` and share its keyword arguments: `reference_images`,
-`aspect_ratio`, `quality`, `provider`.
+`aspect_ratio`, `quality`, `provider`, `world`.
 
-Files land in `img/<asset-type-dir>/` (`characters/`, `objects/`, `locations/`,
-`scenes/`) named `{name}_{style}_{uuid8}_{provider}`, so an OpenAI run never
-overwrites its Gemini counterpart. The extension comes from the actual returned
-bytes.
+Files land in `img/<world>/<asset-type-dir>/` (`characters/`, `objects/`,
+`locations/`, `scenes/`) named `{name}_{style}_{uuid8}_{provider}`, so an OpenAI
+run never overwrites its Gemini counterpart. The extension comes from the actual
+returned bytes.
 
 The uuid is minted once per `generate_asset` call, so **re-rendering the same
 name and style keeps every attempt** instead of replacing the previous one —
@@ -117,7 +122,46 @@ single generation.
 slot holds the exception instead, so one outage doesn't discard the other image.
 
 To write bytes yourself — or to re-tag a file for print — call `save_image(data,
-filename, asset_type, dpi=300)`.
+filename, asset_type, world, dpi=300)`.
+
+## Worlds
+
+A **world** is a setting: its own characters, objects, locations and scenes,
+kept apart from every other project. It is one folder between `img/` and the
+asset-type directories, and nothing more — the world is never a token in the
+filename, which is what keeps the right-to-left filename parse unambiguous.
+
+```text
+img/
+└── default/
+    ├── characters/
+    ├── objects/
+    ├── locations/
+    └── scenes/
+```
+
+The sidebar switcher picks the active world on every page; **Worlds**
+(`pages/2_Worlds.py`) creates, renames and deletes them. Deleting takes the
+assets with it and there is no undo — `img/` is not tracked by git. Renaming and
+deleting are held while a generation is in flight.
+
+**A scene can only be built from references in its own world.** The scene picker
+only offers the active world's assets, and `generate_asset` refuses any
+reference that is already in the library but belongs elsewhere — so the rule
+holds for API callers too. Uploaded references are exempt: they never live in
+`img/` and so belong to no world.
+
+Assets cross worlds by being moved or duplicated, one at a time from a tile's
+**Details** expander or in bulk from the ticked selection. A move refuses rather
+than renames when the target already holds that filename: a `_2` suffix would
+break the filename parse.
+
+Everything written before worlds existed is folded into `default` automatically
+the first time the app starts. To do it up front instead:
+
+```bash
+cd asset_generation && python -m shared.worlds
+```
 
 ## Asset types
 
@@ -138,9 +182,10 @@ reproduce exactly. See `REFERENCE_CLAUSES` and `FOLLOW_REFERENCE_CLAUSES` in
 
 ### `style`
 
-Ten animation styles, keys of `STYLES` in `prompt_manager.py`: `flat_2d`,
+Twelve animation styles, keys of `STYLES` in `prompt_manager.py`: `flat_2d`,
 `anime_cel`, `pixar_3d`, `stop_motion_clay`, `watercolor_storybook`,
-`comic_ink`, `retro_cartoon_1930s`, `pixel_art`, `low_poly_3d`, `paper_cutout`.
+`comic_ink`, `retro_cartoon_1930s`, `pixel_art`, `low_poly_3d`, `paper_cutout`,
+`ligne_claire_color`, `ligne_claire_lineart`.
 
 Each expands to a long clause rather than a one-word label — "anime" alone
 leaves the model averaging over decades of unrelated work.

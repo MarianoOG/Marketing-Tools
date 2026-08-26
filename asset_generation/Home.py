@@ -1,4 +1,9 @@
-"""Asset Library - browse, download and delete every generated asset.
+"""Asset Library - browse, download, move and delete every generated asset.
+
+One world at a time: the sidebar switcher picks it, and everything below - the
+grid, the filters, the bulk bar - is that world's. Assets cross between worlds
+only by being moved or duplicated, one at a time from a tile's Details expander
+or in bulk from the ticked selection.
 
 Run from the asset_generation directory:
 
@@ -9,6 +14,7 @@ Run from the asset_generation directory:
 from __future__ import annotations
 
 import mimetypes
+from pathlib import Path
 from typing import List
 
 import streamlit as st
@@ -17,12 +23,101 @@ from prompt_manager import ASSET_DIRS
 from shared import jobs
 from shared.library import Asset, filter_assets, list_assets, load_bytes, delete_asset
 from shared.state import init_session_state
+from shared.worlds import copy_asset, list_worlds, move_asset, render_world_switcher
 
 #: Tiles per row and per page. Renders are 2K, so a page is a real cost.
 COLUMNS = 4
 PAGE_SIZE = 24
 
 ALL = "All"
+
+
+def _toggle_selection(key: str, path: str) -> None:
+    """Mirror one tile's checkbox into the session-wide selection set."""
+    if st.session_state[key]:
+        st.session_state.selection.add(path)
+    else:
+        st.session_state.selection.discard(path)
+
+
+def selected_paths() -> List[Path]:
+    """The current selection, pruned of anything no longer on disk.
+
+    An asset deleted from its own expander leaves its path behind in the set;
+    dropping it here keeps the next bulk action from failing on a ghost.
+    """
+    selection = st.session_state.selection
+    paths = sorted((Path(p) for p in selection), key=str)
+    alive = [path for path in paths if path.exists()]
+    if len(alive) != len(selection):
+        st.session_state.selection = {str(path) for path in alive}
+    return alive
+
+
+def transfer(paths: List[Path], target: str, copy: bool) -> None:
+    """Move or duplicate assets into ``target``, then rerun with a verdict.
+
+    Per-file failures are collected rather than aborting the batch: a single
+    name already taken in the target should not strand the other twenty. The
+    outcome goes through session state because the rerun below wipes anything
+    written to the page directly.
+    """
+    verb = "Duplicated" if copy else "Moved"
+    done = 0
+    failed: List[str] = []
+    for path in paths:
+        try:
+            if copy:
+                copy_asset(path, target)
+            else:
+                move_asset(path, target)
+            done += 1
+            if not copy:
+                # The tile is gone from this world, so Streamlit retires its
+                # checkbox on its own; only the selection has to be told.
+                st.session_state.selection.discard(str(path))
+        except Exception as exc:
+            failed.append(f"{path.name} - {exc}")
+
+    if failed:
+        st.session_state.bulk_notice = (
+            'warning',
+            f"{verb} {done} of {len(paths)} to **{target}**. " + "; ".join(failed),
+        )
+    else:
+        st.session_state.bulk_notice = (
+            'success',
+            f"{verb} {done} asset{'s' if done != 1 else ''} to **{target}**.",
+        )
+
+    list_assets.clear()
+    st.rerun()
+
+
+def render_bulk_bar(targets: List[str]) -> None:
+    """Act on every ticked tile at once. Hidden while nothing is ticked."""
+    paths = selected_paths()
+    if not paths:
+        return
+
+    st.info(f"{len(paths)} selected")
+    if not targets:
+        st.caption("Create another world before moving anything out of this one.")
+        return
+
+    target_col, move_col, copy_col, clear_col = st.columns([3, 1, 1, 1])
+    target = target_col.selectbox(
+        "Move or duplicate to", targets, key='bulk_target', label_visibility='collapsed'
+    )
+    if move_col.button("Move", key='bulk_move', width='stretch'):
+        transfer(paths, target, copy=False)
+    if copy_col.button("Duplicate", key='bulk_copy', width='stretch'):
+        transfer(paths, target, copy=True)
+    if clear_col.button("Clear", key='bulk_clear', width='stretch'):
+        for path in paths:
+            st.session_state.pop(f"select_{path}", None)
+        st.session_state.selection = set()
+        st.rerun()
 
 
 def render_filters(assets: List[Asset]) -> List[Asset]:
@@ -68,18 +163,40 @@ def paginate(assets: List[Asset]) -> List[Asset]:
     return assets[start:start + PAGE_SIZE]
 
 
-def render_tile(asset: Asset) -> None:
+def render_tile(asset: Asset, targets: List[str]) -> None:
     """One thumbnail plus an expander holding the full view, download and delete.
 
     The download button lives in the expander on purpose: it needs its bytes at
     render time, and loading every tile's 3-6 MB on every rerun would make the
     grid crawl.
+
+    ``value=`` on the checkbox is what survives pagination: Streamlit drops
+    widget state for anything not rendered on the previous run, so the tick has
+    to be re-seeded from the selection set every time the tile comes back.
     """
     st.image(str(asset.path), width='stretch')
     st.caption(asset.label)
 
+    key = f"select_{asset.path}"
+    st.checkbox(
+        "Select",
+        value=str(asset.path) in st.session_state.selection,
+        key=key,
+        on_change=_toggle_selection,
+        args=(key, str(asset.path)),
+    )
+
     with st.expander("Details"):
         st.text(asset.path.name)
+        if targets:
+            target = st.selectbox(
+                "Move or duplicate to", targets, key=f"target_{asset.path}"
+            )
+            move_col, copy_col = st.columns(2)
+            if move_col.button("Move", key=f"move_{asset.path}", width='stretch'):
+                transfer([asset.path], target, copy=False)
+            if copy_col.button("Duplicate", key=f"copy_{asset.path}", width='stretch'):
+                transfer([asset.path], target, copy=True)
         st.download_button(
             "Download",
             data=load_bytes(asset.path, asset.mtime),
@@ -97,6 +214,7 @@ def render_tile(asset: Asset) -> None:
             width='stretch',
         ):
             delete_asset(asset.path)
+            st.session_state.selection.discard(str(asset.path))
             list_assets.clear()
             st.rerun()
 
@@ -117,13 +235,13 @@ def watch_jobs() -> None:
     st.info(f"{running} generation{'s' if running > 1 else ''} in progress...")
 
 
-def render_grid(assets: List[Asset]) -> None:
+def render_grid(assets: List[Asset], targets: List[str]) -> None:
     """Lay the tiles out in rows of :data:`COLUMNS`."""
     for row_start in range(0, len(assets), COLUMNS):
         row = assets[row_start:row_start + COLUMNS]
         for column, asset in zip(st.columns(COLUMNS), row):
             with column:
-                render_tile(asset)
+                render_tile(asset, targets)
 
 
 def main() -> None:
@@ -134,11 +252,24 @@ def main() -> None:
     # is what refreshes the listing cache before it is read below.
     jobs.collect()
 
+    world = render_world_switcher()
+    targets = [name for name in list_worlds() if name != world]
+
     st.title("🎨 Asset Library")
-    st.caption("Every character, object, location and scene generated so far.")
+    st.caption(f"Every character, object, location and scene in **{world}**.")
 
     # Both shown once: they report on the run that just ended, not on a state the
     # library should keep nagging about.
+    if st.session_state.migration_skipped:
+        st.warning(
+            "Left in the old pre-world folders because that name was already "
+            "taken in `default`: "
+            + ", ".join(st.session_state.migration_skipped)
+        )
+    if st.session_state.bulk_notice:
+        kind, text = st.session_state.bulk_notice
+        getattr(st, kind)(text)
+        st.session_state.bulk_notice = None
     if st.session_state.job_error:
         st.warning(f"Last generation failed: {st.session_state.job_error}")
         st.session_state.job_error = None
@@ -148,9 +279,9 @@ def main() -> None:
     if jobs.running_count():
         watch_jobs()
 
-    assets = list_assets()
+    assets = list_assets(world=world)
     if not assets:
-        st.info("No assets yet. Generate your first one to get started.")
+        st.info(f"No assets in {world} yet. Generate your first one to get started.")
         if st.button("Create an asset", type="primary"):
             st.switch_page("pages/1_Create.py")
         return
@@ -162,12 +293,16 @@ def main() -> None:
     visible = render_filters(assets)
     st.caption(f"{len(visible)} of {len(assets)} assets")
 
+    # Above the filter result on purpose: a selection stays actionable even when
+    # the filters currently hide every tile in it.
+    render_bulk_bar(targets)
+
     if not visible:
         st.info("No assets match these filters.")
         return
 
     st.divider()
-    render_grid(paginate(visible))
+    render_grid(paginate(visible), targets)
 
 
 if __name__ == '__main__':

@@ -23,15 +23,17 @@ Marketing Tools/
 │   ├── config.py         # Configuration
 │   └── .env              # API keys (YOUTUBE_API_KEY)
 ├── asset_generation/     # Character/object/location/scene images via OpenAI + Gemini
-│   ├── Home.py           # Asset Library - browse, download, delete
+│   ├── Home.py           # Asset Library - browse, download, move, delete
 │   ├── pages/            # Multi-page Streamlit pages
-│   │   └── 1_Create.py   # Generation form for all four asset types
+│   │   ├── 1_Create.py   # Generation form for all four asset types
+│   │   └── 2_Worlds.py   # Create, rename and delete worlds
 │   ├── shared/           # Shared helpers
 │   │   ├── state.py      # Session state + cached generator
+│   │   ├── worlds.py     # The img/<world>/ layer: listing, CRUD, move/copy
 │   │   └── library.py    # img/ scanning, filename parsing, byte loading
 │   ├── generation.py     # AssetImageGenerator + save_image helper
 │   ├── prompt_manager.py # Styles, per-asset framing rules, prompt composition
-│   ├── img/              # Generated images land here, one subdir per asset type
+│   ├── img/              # Generated images: img/<world>/<asset-type>/
 │   └── .env              # API keys (GEMINI_API_KEY, OPENAI_API_KEY)
 └── .venv/            # Shared Python 3.12 virtual environment
 ```

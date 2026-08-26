@@ -12,7 +12,6 @@ library, which already lists the newest asset first.
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -26,6 +25,7 @@ from prompt_manager import ASSET_DIRS, STYLES
 from shared import jobs
 from shared.library import Asset, REFERENCE_TYPES, list_assets
 from shared.state import init_session_state
+from shared.worlds import render_world_switcher, slugify
 
 #: Only the friendly spellings. ``ASPECT_RATIOS`` also holds the raw `16:9`,
 #: `1:1` and `9:16` keys, which would show up as duplicate options.
@@ -46,16 +46,6 @@ STYLE_OPTIONS = list(STYLES) + [None]
 
 #: What the ``None`` option is called on screen, and in the captions that explain it.
 FOLLOW_LABEL = "Follow references"
-
-
-def slugify(name: str) -> str:
-    """Reduce a typed name to something ``save_image`` will accept.
-
-    It rejects path separators outright, and the generator calls
-    ``Path(filename).stem`` - which would quietly truncate ``fox.hero`` to
-    ``fox``.
-    """
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def render_form(disabled: bool) -> Dict:
@@ -160,12 +150,17 @@ def render_upload_references(disabled: bool, follow: bool) -> None:
     )
 
 
-def render_library_references(disabled: bool, follow: bool) -> None:
-    """Multi-select the existing sheets a scene should reproduce."""
+def render_library_references(disabled: bool, follow: bool, world: str) -> None:
+    """Multi-select the existing sheets a scene should reproduce.
+
+    Scoped to ``world``: a scene belongs to one setting, so the assets it can be
+    built from are exactly that setting's. ``generate_asset`` enforces the same
+    rule again on the way in, for anything that does not come through this form.
+    """
     st.subheader("Reference assets")
     st.caption(
         "Scenes treat these as authority: the designs are reproduced faithfully. "
-        "Pick any number of characters, objects and locations."
+        f"Pick any number of characters, objects and locations from **{world}**."
         + (
             " With no style picked each one also keeps its own art style, so "
             "the frame is not unified into one look."
@@ -176,10 +171,10 @@ def render_library_references(disabled: bool, follow: bool) -> None:
 
     selected: List[Asset] = []
     for column, asset_type in zip(st.columns(len(REFERENCE_TYPES)), REFERENCE_TYPES):
-        options = list_assets(asset_type)
+        options = list_assets(asset_type, world=world)
         with column:
             if not options:
-                st.caption(f"No {asset_type}s generated yet.")
+                st.caption(f"No {asset_type}s in this world yet.")
                 continue
             selected.extend(
                 st.multiselect(
@@ -229,6 +224,7 @@ def accept_job() -> None:
             'aspect_ratio': state.aspect_ratio,
             'quality': state.quality,
             'provider': PROVIDER,
+            'world': state.current_world,
         },
         'blobs': blobs,
         'library_refs': library_refs,
@@ -266,8 +262,15 @@ def main() -> None:
 
     running = jobs.is_running() or st.session_state.pending_job is not None
 
+    # Locked while a job is in flight: the world was captured when Generate was
+    # clicked, so switching now would only mislead about where the file lands.
+    world = render_world_switcher(disabled=running)
+
     st.title("✨ Create an asset")
-    st.caption("Characters, objects and locations are reference sheets; scenes are finished frames.")
+    st.caption(
+        f"Generating into **{world}**. Characters, objects and locations are "
+        "reference sheets; scenes are finished frames."
+    )
 
     if st.button("← Back to library"):
         st.switch_page("Home.py")
@@ -280,7 +283,7 @@ def main() -> None:
     # of session state, so nothing here has to survive to the submitting run.
     follow = fields['style'] is None
     if fields['asset_type'] == "scene":
-        render_library_references(running, follow)
+        render_library_references(running, follow, world)
     else:
         render_upload_references(running, follow)
 

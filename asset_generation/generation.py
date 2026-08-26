@@ -2,7 +2,7 @@
 
 Both providers sit behind one interface: :meth:`AssetImageGenerator.generate_asset`
 and its four per-type wrappers. Prompts come from :mod:`prompt_manager`, renders
-are written under ``img/<asset-type-dir>/``, and the methods return the
+are written under ``img/<world>/<asset-type-dir>/``, and the methods return the
 :class:`Path` written.
 
 OpenAI emits PNG, Gemini JPEG; bytes are stored provider-native and output is
@@ -27,6 +27,11 @@ from prompt_manager import ASSET_DIRS, REFERENCE_STYLE_SLUG, AssetType, build_pr
 
 IMG_DIR = Path(__file__).parent / "img"
 ENV_PATH = Path(__file__).parent / ".env"
+
+#: The world every asset belongs to unless one is named. Lives here rather than
+#: in :mod:`shared.worlds` because this module owns the write path, and
+#: ``shared.worlds`` imports it from here.
+DEFAULT_WORLD = "default"
 
 OPENAI_MODEL = "gpt-image-2"
 GEMINI_MODEL = "gemini-3.1-flash-image"
@@ -78,13 +83,18 @@ def save_image(
     data: bytes,
     filename: str,
     asset_type: AssetType,
+    world: str = DEFAULT_WORLD,
     dpi: int | None = None,
 ) -> Path:
-    """Write image bytes into ``img/<asset-type-dir>/`` and return the path.
+    """Write image bytes into ``img/<world>/<asset-type-dir>/`` and return the path.
 
     ``filename`` is a stem: the extension comes from the actual format of
     ``data``, so a JPEG never ends up named ``.png``. ``dpi`` tags the file with
     a physical resolution (300 for print) — without one a printer guesses.
+
+    The world is its own argument and never part of ``filename``: separators are
+    rejected below, and the gallery parses the stem right to left, so a world
+    name in there would make that parse ambiguous.
     """
     stem = Path(filename).stem
     if not stem or any(sep in filename for sep in ("/", "\\")):
@@ -93,10 +103,12 @@ def save_image(
         raise ValueError(
             f"asset_type must be one of {sorted(ASSET_DIRS)}, got {asset_type!r}"
         )
+    if not world or world in (".", "..") or any(sep in world for sep in ("/", "\\")):
+        raise ValueError(f"world must be a bare folder name, got {world!r}")
 
     image = Image.open(BytesIO(data))
     image_format = image.format or "PNG"
-    directory = IMG_DIR / ASSET_DIRS[asset_type]
+    directory = IMG_DIR / world / ASSET_DIRS[asset_type]
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{stem}{_EXTENSIONS.get(image_format, '.png')}"
 
@@ -128,6 +140,25 @@ def _as_paths(reference_images: Sequence[Path | str] | None) -> list[Path]:
         if not path.is_file():
             raise FileNotFoundError(f"reference image not found: {path}")
     return paths
+
+
+def _check_world(references: list[Path], world: str) -> None:
+    """Refuse references belonging to a world other than the one being written.
+
+    This is the real enforcement of "no scenes from another world's assets" - the
+    scoped picker in the UI is only the half a caller can bypass. Uploaded
+    references live in a temporary directory outside ``img/`` and so are exempt:
+    only a file that is already *in* the library is claimed by a world.
+    """
+    root = IMG_DIR.resolve()
+    world_root = (IMG_DIR / world).resolve()
+    for path in references:
+        resolved = path.resolve()
+        if resolved.is_relative_to(root) and not resolved.is_relative_to(world_root):
+            raise ValueError(
+                f"reference {path.name} belongs to another world; an asset in "
+                f"{world!r} can only be built from {world!r} references"
+            )
 
 
 class AssetImageGenerator:
@@ -254,6 +285,7 @@ class AssetImageGenerator:
         aspect_ratio: AspectRatio,
         quality: Quality,
         references: list[Path],
+        world: str,
     ) -> Path:
         """Call one provider with a finished prompt, save the bytes, return the path.
 
@@ -265,7 +297,7 @@ class AssetImageGenerator:
             data = self._openai_bytes(prompt, ratio, openai_quality, references)
         else:
             data = self._gemini_bytes(prompt, ratio, thinking_level, references)
-        return save_image(data, filename, asset_type)
+        return save_image(data, filename, asset_type, world)
 
     def _render_both(
         self,
@@ -275,6 +307,7 @@ class AssetImageGenerator:
         aspect_ratio: AspectRatio,
         quality: Quality,
         references: list[Path],
+        world: str,
     ) -> dict[str, Path | Exception]:
         """Render the same prompt with both providers, concurrently, and save both.
 
@@ -295,6 +328,7 @@ class AssetImageGenerator:
                     aspect_ratio,
                     quality,
                     references,
+                    world,
                 )
                 for provider in ("openai", "gemini")
             }
@@ -315,18 +349,23 @@ class AssetImageGenerator:
         aspect_ratio: AspectRatio = "landscape",
         quality: Quality = "low",
         provider: Literal["openai", "gemini", "both"] = "both",
+        world: str = DEFAULT_WORLD,
     ) -> RenderResult:
         """Build the prompt for ``asset_type`` and render it.
 
-        Files are named ``{name}_{style}_{uuid8}_{provider}`` inside the asset
-        type's folder. The uuid is minted once per call, so re-rendering the same
-        name and style keeps every attempt and a ``provider="both"`` run shares
-        one uuid across its pair; see the README.
+        Files are named ``{name}_{style}_{uuid8}_{provider}`` inside
+        ``img/<world>/<asset-type-dir>/``. The uuid is minted once per call, so
+        re-rendering the same name and style keeps every attempt and a
+        ``provider="both"`` run shares one uuid across its pair; see the README.
+
+        ``world`` decides both where the file lands and which references are
+        allowed: anything already in the library must belong to that same world.
 
         ``provider="both"`` returns the per-provider dict (it appends the provider
         suffix itself); a single provider returns its :class:`Path`.
         """
         references = _as_paths(reference_images)
+        _check_world(references, world)
         prompt = build_prompt(
             asset_type, description, style, with_references=bool(references)
         )
@@ -342,6 +381,7 @@ class AssetImageGenerator:
                 aspect_ratio,
                 quality,
                 references,
+                world,
             )
         if provider in ("openai", "gemini"):
             return self._render(
@@ -352,6 +392,7 @@ class AssetImageGenerator:
                 aspect_ratio,
                 quality,
                 references,
+                world,
             )
         raise ValueError(
             f"provider must be 'openai', 'gemini' or 'both', got {provider!r}"
