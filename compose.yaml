@@ -1,0 +1,31 @@
+# One image, two services. Only the backend can write to ./data;
+# the frontend mounts it read-only and changes things through the backend.
+services:
+  backend:
+    build: .
+    image: marketing-tools
+    command: backend
+    environment:
+      BACKEND_HOST: 0.0.0.0
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./data:/data
+
+  frontend:
+    build: .
+    image: marketing-tools
+    command: >
+      streamlit run frontend/app.py
+      --server.address=0.0.0.0 --server.port=8501 --server.headless=true
+    environment:
+      BACKEND_URL: http://backend:8765/mcp
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      - backend
