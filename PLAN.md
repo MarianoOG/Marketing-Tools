@@ -1,14 +1,15 @@
-# Plan: from separate tools to one content system
+# Plan: one backend, one frontend
 
-This repository turns into a single local app, a system of record for content
-with automation tools around it. Ideas, collaborators, assets and performance
-live in one place, and you can measure how long each piece takes to come to life.
-
-It has two parts:
+This plan moves the two existing tools, **Creator Discovery** (`youtube/`) and
+the **Asset Generation Studio** (`asset_generation/`), into one structure that
+can grow later:
 
 - **backend**: an MCP server. It holds all the logic and is the only thing
-  that writes to the database.
-- **frontend**: a Streamlit UI that talks to the backend through MCP.
+  that writes data.
+- **frontend**: one Streamlit UI that talks to the backend through MCP.
+
+It adds no new features. Everything that works today keeps working the same way.
+The only change is where the code lives and how its parts talk to each other.
 
 ## Principles
 
@@ -17,30 +18,20 @@ It has two parts:
 - **The frontend reads files read-only.** Images stay on disk. Tools return
   paths, and the frontend mounts the data folder `:ro`. Uploads go to tools as
   base64.
-- **Don't rebuild what already exists.** Publishing and scheduling belong to
-  Buffer, and Todoist keeps life tasks. The backend exposes only what nobody else
-  has: pieces, stages, time, lineage, assets, explore tools, and performance per
-  piece.
-- **Local first.** `docker compose up` or `uv run`. No hosting or auth for now,
-  but the database URL comes from the environment and file access goes through
-  one module, so a later move to the cloud is a config change.
-- **Each phase must make the next piece of content faster.** If one doesn't,
-  stop and reassess.
+- **Local first.** `docker compose up` or `uv run`. No hosting or auth. The
+  database URL comes from the environment and file access goes through one
+  module, so a later move to the cloud stays a config change.
 
 ## Decisions
 
 | Topic | Decision |
 |---|---|
 | Naming | `backend/` and `frontend/`. Not `mcp/`, because a top-level package with that name would shadow the `mcp` library that FastMCP depends on. In Claude the server is registered as `marketing-tools`. |
-| Pieces | A piece is one unit of work. Derivatives (a video from a blog post, clips from a video) are child pieces. There is no publication entity: pieces are not tied to where they were published. |
-| Analytics | Per piece only: **impressions** (views) and **engagement** (likes, comments, saves, shares), summed across platforms. No conversion tracking for now. |
-| Publishing | Out of scope. Buffer does it. |
-| Todoist | Brand content leaves Todoist. The backend owns pieces and stages, and there is no sync. Mariano handles the migration and skill updates once the system is proven. This repo never touches Todoist or the skills. |
-| WordPress | `wordpress/` stays where it is, untouched and outside the system. It may become a tool later. |
-| Packaging | One `pyproject.toml` + `uv.lock` and one Docker image, run through Compose. The per-project `requirements.txt` files for `youtube/` and `asset_generation/` go away. |
-| Frontend | Keep Streamlit, with `st.navigation` sections **Explore / Create / Analyse**. |
-| Database | SQLite (WAL) through SQLAlchemy, with Alembic migrations from day one. |
+| Packaging | One `pyproject.toml` + `uv.lock` and one Docker image, run through Compose. The `requirements.txt` files of `youtube/` and `asset_generation/` go away. |
+| Frontend | Streamlit, with `st.navigation` sections. Explore holds Creator Discovery; Create holds the asset library, the generation form and worlds. A section appears only once it has a tool. |
+| Database | SQLite (WAL) through SQLAlchemy, with Alembic migrations. It holds only what exists today: worlds and assets. The images themselves stay on disk. |
 | MCP | FastMCP over streamable HTTP, with plain tools. |
+| WordPress | `wordpress/` stays where it is, untouched and outside the structure. |
 
 ## Target layout
 
@@ -49,24 +40,18 @@ pyproject.toml  uv.lock  Dockerfile  compose.yaml  .env.example
 backend/                  # MCP server, the only writer
   server.py               # FastMCP app: registers the tools below
   config.py               # env: DATABASE_URL, DATA_DIR, API keys
-  db.py  models.py        # SQLAlchemy engine + tables
+  db.py  models.py        # SQLAlchemy engine + world/asset tables
   storage.py              # save / open / path_for (the only file I/O)
-  create/
-    assets/               # generation.py, prompt_manager.py (moved as-is)
-    pieces.py             # pieces, stages, lineage, time
-  explore/
-    youtube/              # youtube_api, pipeline, metrics, filters, aggregation
-    people.py             # collaborators, podcasts, outlets
-  analyse/
-    performance.py        # metric sync + per-piece reports
+  assets/                 # generation.py, prompt_manager.py, worlds, library, jobs
+  youtube/                # youtube_api, pipeline, metrics, filters, aggregation, sorting, config
 frontend/                 # Streamlit, MCP client, data mounted read-only
-  app.py                  # st.navigation with the three sections
+  app.py                  # st.navigation: Explore, Create
   client.py               # call(tool, **args) → backend
-  pages/                  # library, create asset, worlds, board, piece,
-                          # creator search/results/detail, people, performance
+  pages/                  # today's pages: search, results, creator,
+                          # library, create, worlds
 migrations/               # Alembic
 tests/
-wordpress/                # untouched, outside the system
+wordpress/                # untouched, outside the structure
 data/                     # gitignored: app.db + img/<world>/<type>/
 ```
 
@@ -77,42 +62,25 @@ Compose runs two services from one image:
 
 ## Data model
 
-| Table | Key columns |
+| Table | Columns |
 |---|---|
-| `piece` | id, title, format (blog/video/short/podcast/newsletter/post), stage, parent_id → piece, notes, external_refs (JSON, see below), created_at, published_at |
-| `stage_event` | piece_id, stage, entered_at, left_at, minutes |
 | `world` | id, name, slug |
-| `asset` | id, world_id, type (character/object/location/scene/other), name, style, provider, generation_uid, path (relative to `DATA_DIR`), created_at |
-| `piece_asset` | piece_id, asset_id, role |
-| `person` | id, name, kind (creator/podcast/guest/outlet), links, notes, source (e.g. YouTube channel id) |
-| `piece_person` | piece_id, person_id, role (guest, collaborator, host) |
-| `piece_metric` | piece_id, date, impressions, likes, comments, saves, shares |
+| `asset` | id, world_id, type (character/object/location/scene), name, style, provider, generation_uid, path (relative to `DATA_DIR`), created_at |
 
-The stages mirror today's Brand board: `idea → draft → assets → edit → review →
-published`. *Repurpose* stops being a stage and becomes child pieces. Lead time
-(idea → published) and touch time (sum of minutes) come straight from
-`stage_event`.
+That's everything the filename and folder already encode today, moved into
+rows. The filename convention stays, so files remain readable without the
+database.
 
-`external_refs` is the only link to the outside world: the Buffer post IDs (and
-YouTube video IDs, if needed) whose numbers belong to the piece. It exists only
-so the metric sync knows what to add up. It is not a publication record.
+## MCP tools
 
-## MCP tools (v1)
+Each tool is an existing function, wrapped:
 
 - **Assets:** `list_assets(world, type, style, provider, limit, cursor)`,
   `get_asset`, `start_generation(...)` → job id, `get_job`, `move_asset`,
-  `copy_asset`, `delete_asset`, `list_worlds`, `create_world`, `rename_world`,
-  `delete_world`
-- **Pieces:** `create_piece(title, format, parent_id?, created_at?)`,
-  `move_piece(id, stage, minutes?, at?)`, `log_time`, `list_pieces(stage, format,
-  limit, cursor)`, `get_piece` (with assets, people, children, timing,
-  performance), `link_asset`, `link_person`, `add_external_ref`
-- **Explore:** `search_creators(keyword, view_range, subscriber_range,
-  activity_days)`, `get_creator`, `save_person`, `list_people`
-- **Analyse:** `sync_metrics`, `piece_performance(period)`
-
-Optional timestamps (`created_at`, `at`) exist so the Todoist history can be
-backfilled later through Claude, without an import script.
+  `copy_asset`, `delete_asset`
+- **Worlds:** `list_worlds`, `create_world`, `rename_world`, `delete_world`
+- **YouTube:** `search_creators(keyword, view_range, subscriber_range,
+  activity_days)`, `get_creator`. Results stay transient, as they are today.
 
 ## Phases
 
@@ -122,24 +90,24 @@ backfilled later through Claude, without an import script.
    `requirements.txt` files of `youtube/` and `asset_generation/`.
 2. Move the code into `backend/` and `frontend/` as laid out above, fixing
    imports. Until Phase 1, the frontend imports backend modules directly.
-3. One Streamlit app with `st.navigation` sections: Explore (creator
-   discovery), Create (library, create, worlds), Analyse (placeholder).
+3. One Streamlit app with `st.navigation`: Explore (Creator Discovery) and
+   Create (library, create, worlds).
 4. Merge the two `.env` files into one root `.env.example`. Move `img/` under
    `data/img/`.
 5. Add `Dockerfile` and `compose.yaml` (frontend only at this point).
 6. Update `CLAUDE.md` and the READMEs.
 
-**Done when:** both existing tools work exactly as before from
-`docker compose up` and from `uv run streamlit run frontend/app.py`.
+**Done when:** both tools work exactly as before from `docker compose up` and
+from `uv run streamlit run frontend/app.py`.
 
-### Phase 1: database + MCP backend, starting with assets
+### Phase 1: backend for assets and worlds
 
 1. `config.py`, `db.py`, `models.py`, and an Alembic baseline (`world`, `asset`).
 2. `storage.py` becomes the only place that touches files.
-3. Index the existing `img/` tree into `asset` and `world` (filename parse from
-   `shared/library.py`), run once on startup and idempotent.
+3. Index the existing `img/` tree into `world` and `asset` (the filename parse
+   from `library.py`), run once on startup and idempotent.
 4. `server.py` with the asset and world tools. The background generation runner
-   (today's `shared/jobs.py`) moves into the backend.
+   (`jobs.py`) moves into the backend.
 5. `frontend/client.py`. The library, create and worlds pages switch to MCP
    calls, and the frontend mounts `data/` read-only.
 6. Add the `backend` service to Compose and document `claude mcp add
@@ -147,45 +115,24 @@ backfilled later through Claude, without an import script.
 7. Tests: pytest using FastMCP's in-memory `Client` against a temporary
    database.
 
-**Done when:** the asset library works through the backend, and Claude can
-generate and list assets.
+**Done when:** the asset pages behave as today but go through the backend, and
+Claude can list worlds and assets and generate new ones.
 
-### Phase 2: pieces (the Create system of record)
+### Phase 2: backend for Creator Discovery
 
-1. Migration: `piece`, `stage_event`, `piece_asset`.
-2. Piece tools.
-3. Frontend: a **Board** (columns per stage, move with time logged) and a
-   **Piece** detail page (assets gallery, children, timeline, minutes per stage).
-4. Asset generation accepts `piece_id`, and the library can filter by piece.
+1. `search_creators` and `get_creator` tools wrapping `pipeline.py` and
+   `youtube_api.py`.
+2. The search, results and creator pages switch to MCP calls.
 
-**Done when:** a new idea can be carried from idea to published in this app
-alone, with lead and touch time visible.
+**Done when:** Creator Discovery behaves as today but goes through the backend,
+and Claude can search creators.
 
-### Phase 3: Explore on the backend
+## Not in this plan
 
-1. Migration: `person`, `piece_person`.
-2. Creator search and detail tools. Search results stay transient; only saved
-   creators become `person` rows.
-3. The YouTube pages switch to MCP calls, with a "save as person" action and a
-   **People** gallery.
+These came up and were set aside. Each would be its own plan later:
 
-**Done when:** "find collaborators → save → start a piece with them" works from
-both Claude and the frontend.
-
-### Phase 4: Analyse (performance per piece)
-
-1. Migration: `piece_metric`.
-2. `sync_metrics` reads impressions and engagement for each piece's
-   `external_refs` from the Buffer API, plus the YouTube Data API for anything
-   Buffer doesn't cover. It runs in the backend, triggered from the frontend or
-   by Claude.
-3. **Performance** page: impressions and engagement per piece next to its lead
-   and touch time, plus repurpose candidates (top performers with no children).
-
-**Done when:** one page shows which pieces performed best and how long each took.
-
-## Open questions
-
-- **Buffer coverage:** does Buffer's API return impressions, likes, comments,
-  saves and shares per post for every channel you use, or do some (e.g.
-  long-form YouTube) need their own API? Check this before Phase 4.
+- **Pieces, stages and lineage** (the content system of record). Until they
+  exist, the Brand pipeline stays in Todoist.
+- **People and outlets** saved from Explore.
+- **Analytics and publishing**: Buffer already covers both.
+- **WordPress** as a tool.
