@@ -1,6 +1,8 @@
 .venv/
+.env
 */.env
-*/__pycache__/
-*/*/__pycache__/
-.claude/*
+__pycache__/
+data/
+# Left over from the old layout (asset_generation/img) until moved to data/img.
 */img/
+.claude/*
