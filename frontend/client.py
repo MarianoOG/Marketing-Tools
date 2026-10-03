@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import MCPError
 
 from backend.config import DATA_DIR as DEFAULT_DATA_DIR
 
@@ -74,6 +75,11 @@ def call(
     except (OSError, RuntimeError) as exc:
         raise BackendError(
             f"Cannot reach the backend at {BACKEND_URL}. Is it running? ({exc})"
+        ) from None
+    except MCPError as exc:
+        raise BackendError(
+            f"Lost connection to the backend at {BACKEND_URL} while waiting for a "
+            f"response (it may have restarted). ({exc})"
         ) from None
 
 
