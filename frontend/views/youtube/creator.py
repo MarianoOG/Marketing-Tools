@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import api
-from shared.youtube import RESULTS_PAGE, adopt_from_url
+from shared.youtube import RESULTS_PAGE, adopt_from_url, open_insights
 
 
 def format_date(value: Optional[str], pattern: str) -> str:
@@ -259,9 +259,13 @@ def main():
         return
 
     # Back button
-    if st.button("← Back to Results"):
+    back_col, insights_col = st.columns([4, 1])
+    if back_col.button("← Back to Results"):
         st.session_state.selected_channel = None
         st.switch_page(RESULTS_PAGE)
+    if insights_col.button("💬 Audience insights", width='stretch',
+                           help="Turn this creator's comments into content ideas"):
+        open_insights(channel_id)
 
     st.divider()
 

@@ -50,6 +50,35 @@ ACTIVITY_PRESETS = {
 }
 
 # ============================================================================
+# AUDIENCE INSIGHTS (comment mining)
+# ============================================================================
+
+#: Inexpensive OpenAI model with structured outputs, and its USD price per 1M
+#: tokens (input, output) for the pre-run estimate.
+INSIGHTS_MODEL = "gpt-6-luna"
+INSIGHTS_PRICE_PER_M = (0.10, 0.50)
+
+COMMENTS_PAGE_SIZE = 100  # commentThreads.list max; one page costs 1 quota unit
+DEFAULT_INSIGHT_VIDEOS = 20
+MAX_INSIGHT_VIDEOS = 50
+DEFAULT_COMMENTS_PER_VIDEO = 200
+COMMENTS_PER_VIDEO_OPTIONS = [100, 200, 300, 500]
+#: Niche scope only - keeps one big creator from speaking for the whole niche.
+MAX_VIDEOS_PER_CHANNEL = 3
+#: Comments past this many input tokens are dropped, lowest-liked first.
+INSIGHTS_TOKEN_BUDGET = 100_000
+#: Rough sizes for the estimate, before any comment has been fetched.
+EST_TOKENS_PER_COMMENT = 35
+EST_OUTPUT_TOKENS = 4_000
+
+INSIGHT_CATEGORIES = {
+    "request": "Requests",
+    "question": "Questions",
+    "pain_point": "Pain points",
+    "praise": "Praise",
+}
+
+# ============================================================================
 # LOGGING SETUP
 # ============================================================================
 

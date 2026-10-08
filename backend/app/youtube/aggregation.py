@@ -76,6 +76,7 @@ def aggregate_channels(videos: List[Dict], channel_stats: Dict[str, Dict], keywo
         # Add video to channel's video list
         channels[channel_id]['videos'].append({
             'title': video['title'],
+            'video_id': video['video_id'],
             'url': f"youtube.com/watch?v={video['video_id']}",
             'views': video['views'],
             'published_at': video.get('published_at'),

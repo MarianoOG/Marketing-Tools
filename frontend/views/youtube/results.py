@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import api
-from shared.youtube import CREATOR_PAGE, SEARCH_PAGE, adopt_from_url, render_filters
+from shared.youtube import CREATOR_PAGE, SEARCH_PAGE, adopt_from_url, open_insights, render_filters
 
 
 def last_published_text(channel: Dict) -> str:
@@ -105,7 +105,11 @@ def main():
         return
 
     # Show what was searched
-    st.caption(f"Results for: \"{results['keyword']}\"")
+    caption_col, insights_col = st.columns([4, 1])
+    caption_col.caption(f"Results for: \"{results['keyword']}\"")
+    if insights_col.button("💬 Audience insights", width='stretch',
+                           help="Turn the comments of this niche's most-discussed videos into content ideas"):
+        open_insights()
 
     st.divider()
 
