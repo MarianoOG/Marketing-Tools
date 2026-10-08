@@ -34,7 +34,7 @@ IMG_DIR = ASSETS_DIR
 DEFAULT_WORLD = "default"
 
 OPENAI_MODEL = "gpt-image-2"
-GEMINI_MODEL = "gemini-3.1-flash-image"
+GEMINI_MODEL = "gemini-nano-banana-2.1"
 
 AspectRatio = Literal["landscape", "square", "portrait", "16:9", "1:1", "9:16"]
 Quality = Literal["low", "medium", "high"]
