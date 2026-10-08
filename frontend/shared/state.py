@@ -38,6 +38,12 @@ def init_session_state() -> None:
         # so a refresh reopens them.
         'search_id': None,
         'selected_channel': None,
+        # Audience Insights: the creator to scope to (None = the whole search),
+        # the running job, and the saved run being shown.
+        'insights_channel': None,
+        'insights_job': None,
+        'insights_error': None,
+        'insights_id': None,
         # --- WordPress ---
         'wordpress_job': None,
     }

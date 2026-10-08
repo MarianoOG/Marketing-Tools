@@ -1,5 +1,8 @@
 """Saved searches - one JSON file per search under ``<DATA_DIR>/youtube/searches/``.
 
+Audience Insights runs are kept the same way under ``<DATA_DIR>/youtube/insights/``.
+Nothing here expires; clean-up is left to a separate job.
+
 A search spends YouTube quota, so its result is kept rather than living only in
 a browser session: a page refresh, or a search the user walked away from, can
 still be reopened. The file holds the full aggregated channel data, metrics
@@ -16,6 +19,7 @@ from typing import Any, Dict, List
 from app.settings import YOUTUBE_DIR
 
 SEARCHES_DIR = YOUTUBE_DIR / "searches"
+INSIGHTS_DIR = YOUTUBE_DIR / "insights"
 
 #: Search ids are generated here and are safe filenames; anything else is refused.
 _ID_RE = re.compile(r"^[0-9TZ]{16}_[a-z0-9_]*$")
@@ -44,11 +48,16 @@ def _encode(value: Any) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
 
 
+def _new_id(name: str) -> str:
+    now = datetime.now(timezone.utc)
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+    return f"{now.strftime('%Y%m%dT%H%M%SZ')}_{slug}"
+
+
 def save_search(keyword: str, channels: Dict[str, Dict]) -> str:
     """Write one search and return its id."""
     now = datetime.now(timezone.utc)
-    slug = re.sub(r"[^a-z0-9]+", "_", keyword.lower()).strip("_")[:40]
-    search_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}_{slug}"
+    search_id = _new_id(keyword)
     SEARCHES_DIR.mkdir(parents=True, exist_ok=True)
     record = {
         "id": search_id,
@@ -87,3 +96,44 @@ def list_searches() -> List[Dict]:
             }
         )
     return searches
+
+
+def save_insights(record: Dict) -> str:
+    """Write one Audience Insights run and return its id."""
+    insights_id = _new_id(record["channel_name"] or record["keyword"])
+    INSIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    record = {"id": insights_id, **record}
+    path = INSIGHTS_DIR / f"{insights_id}.json"
+    path.write_text(json.dumps(record, ensure_ascii=False, default=_encode), encoding="utf-8")
+    return insights_id
+
+
+def load_insights(insights_id: str) -> Dict:
+    """One saved run. Raises ``KeyError`` if unknown."""
+    path = INSIGHTS_DIR / f"{insights_id}.json"
+    if not _ID_RE.match(insights_id) or not path.is_file():
+        raise KeyError(insights_id)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_insights(search_id: str | None = None) -> List[Dict]:
+    """Saved runs, newest first, optionally for one search, without their data."""
+    if not INSIGHTS_DIR.is_dir():
+        return []
+    runs = []
+    for path in sorted(INSIGHTS_DIR.glob("*.json"), reverse=True):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if search_id and record["search_id"] != search_id:
+            continue
+        runs.append(
+            {
+                "id": record["id"],
+                "search_id": record["search_id"],
+                "keyword": record["keyword"],
+                "channel_name": record["channel_name"],
+                "created_at": record["created_at"],
+                "comments": len(record["comments"]),
+                "ideas": len(record["insights"]["ideas"]) if record["insights"] else 0,
+            }
+        )
+    return runs

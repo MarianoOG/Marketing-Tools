@@ -13,9 +13,25 @@ from typing import Dict, List, Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from app.youtube.config import BATCH_SIZE, MAX_RESULTS_PER_KEYWORD
+from app.youtube.config import BATCH_SIZE, COMMENTS_PAGE_SIZE, MAX_RESULTS_PER_KEYWORD
 
 logger = logging.getLogger(__name__)
+
+
+class CommentsDisabled(Exception):
+    """The video has comments turned off (HTTP 403 ``commentsDisabled``)."""
+
+
+class QuotaExceeded(Exception):
+    """The API key has no quota left today. Every further call would fail too."""
+
+
+def _error_reason(error: HttpError) -> str:
+    """The machine-readable reason of an API error, e.g. ``commentsDisabled``."""
+    details = getattr(error, 'error_details', None)
+    if isinstance(details, list) and details and isinstance(details[0], dict):
+        return details[0].get('reason', '')
+    return ''
 
 
 class YouTubeService:
@@ -276,3 +292,69 @@ class YouTubeService:
         except HttpError as e:
             logger.warning(f"Error fetching playlist videos: {e}")
             return []
+
+    def get_video_comments(self, video_id: str, max_comments: int = 200) -> List[Dict]:
+        """
+        Fetch the top-level comments of one video, most relevant first.
+
+        Uses ``commentThreads.list`` only (1 quota unit per page of up to 100).
+        Replies are not fetched.
+
+        Args:
+            video_id: The video to read
+            max_comments: Stop after this many comments (default 200)
+
+        Returns:
+            List of comment dicts with video_id, author, text, likes, replies, published_at
+
+        Raises:
+            CommentsDisabled: The video has comments turned off
+            QuotaExceeded: The daily quota is spent
+        """
+        comments = []
+        next_page_token = None
+
+        try:
+            while len(comments) < max_comments:
+                request = self._youtube.commentThreads().list(
+                    part='snippet',
+                    videoId=video_id,
+                    maxResults=COMMENTS_PAGE_SIZE,
+                    order='relevance',
+                    textFormat='plainText',
+                    pageToken=next_page_token,
+                )
+                response = request.execute()
+
+                for item in response.get('items', []):
+                    if len(comments) >= max_comments:
+                        break
+                    snippet = item.get('snippet', {})
+                    top = snippet.get('topLevelComment', {}).get('snippet', {})
+                    comments.append({
+                        'video_id': video_id,
+                        'author': top.get('authorDisplayName', ''),
+                        'text': top.get('textDisplay', ''),
+                        'likes': int(top.get('likeCount', 0)),
+                        'replies': int(snippet.get('totalReplyCount', 0)),
+                        'published_at': top.get('publishedAt', ''),
+                    })
+
+                next_page_token = response.get('nextPageToken')
+                if not next_page_token:
+                    break
+
+                # Be respectful with API calls
+                time.sleep(0.1)
+
+            return comments
+
+        except HttpError as e:
+            reason = _error_reason(e)
+            if reason == 'commentsDisabled':
+                logger.info(f"Comments are disabled on video {video_id}, skipping")
+                raise CommentsDisabled(video_id) from e
+            if reason in ('quotaExceeded', 'dailyLimitExceeded'):
+                raise QuotaExceeded(str(e)) from e
+            logger.warning(f"Error fetching comments for video {video_id}: {e}")
+            return comments

@@ -26,6 +26,7 @@ pages = {
         st.Page("views/youtube/search.py", title="Creator Discovery", icon="🔍"),
         st.Page("views/youtube/results.py", title="Results", icon="📊"),
         st.Page("views/youtube/creator.py", title="Creator", icon="👤"),
+        st.Page("views/youtube/insights.py", title="Audience Insights", icon="💬"),
     ],
     "WordPress": [
         st.Page("views/wordpress/wordpress.py", title="Content Tagging", icon="🏷️"),

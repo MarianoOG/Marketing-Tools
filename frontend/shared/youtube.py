@@ -9,6 +9,14 @@ import api
 SEARCH_PAGE = "views/youtube/search.py"
 RESULTS_PAGE = "views/youtube/results.py"
 CREATOR_PAGE = "views/youtube/creator.py"
+INSIGHTS_PAGE = "views/youtube/insights.py"
+
+
+def open_insights(channel_id: Optional[str] = None) -> None:
+    """Audience Insights for the current search, or one creator in it."""
+    st.session_state.insights_channel = channel_id
+    st.session_state.insights_id = None
+    st.switch_page(INSIGHTS_PAGE)
 
 
 def adopt_from_url(state_key: str, param: str) -> Optional[str]:
